@@ -88,38 +88,69 @@ func (b *Backend) Spawn(ctx context.Context, spec backend.Spec) error {
 	if spec.Kind == "" {
 		spec.Kind = backend.KindClaim
 	}
-	if err := b.run(ctx, b.o.SpawnCommand, spec.WorkerID, b.env(spec)); err != nil {
+	b.mu.Lock()
+	now := b.o.Now()
+	previous, existed := b.state[spec.WorkerID]
+	b.state[spec.WorkerID] = &record{ID: spec.WorkerID, Pool: spec.Pool, RequestID: spec.RequestID(), CreatedAt: now, LastActivity: now}
+	if err := b.saveLocked(); err != nil {
+		if existed {
+			b.state[spec.WorkerID] = previous
+		} else {
+			delete(b.state, spec.WorkerID)
+		}
+		b.mu.Unlock()
 		return err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	now := b.o.Now()
-	b.state[spec.WorkerID] = &record{ID: spec.WorkerID, Pool: spec.Pool, RequestID: spec.RequestID(), CreatedAt: now, LastActivity: now}
-	return b.saveLocked()
+	b.mu.Unlock()
+
+	if err := b.run(ctx, b.o.SpawnCommand, spec.WorkerID, b.env(spec)); err != nil {
+		b.mu.Lock()
+		if existed {
+			b.state[spec.WorkerID] = previous
+		} else {
+			delete(b.state, spec.WorkerID)
+		}
+		rollbackErr := b.saveLocked()
+		b.mu.Unlock()
+		return errors.Join(err, rollbackErr)
+	}
+	return nil
 }
 
 func (b *Backend) Wake(ctx context.Context, spec backend.Spec) error {
 	spec.Kind = backend.KindWake
 	b.mu.Lock()
 	rec, ok := b.state[spec.WorkerID]
-	b.mu.Unlock()
 	if !ok {
+		b.mu.Unlock()
 		return backend.ErrUnknownWorker
 	}
-	if err := b.run(ctx, b.o.SpawnCommand, spec.WorkerID, b.env(spec)); err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == ExitWorkspaceMissing {
-			return fmt.Errorf("spawn hook exit %d: %w", ExitWorkspaceMissing, backend.ErrWorkspaceMissing)
-		}
+	previous := *rec
+	updated := previous
+	updated.LastActivity = b.o.Now()
+	if r := spec.RequestID(); r != "" {
+		updated.RequestID = r
+	}
+	b.state[spec.WorkerID] = &updated
+	if err := b.saveLocked(); err != nil {
+		b.state[spec.WorkerID] = rec
+		b.mu.Unlock()
 		return err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	rec.LastActivity = b.o.Now()
-	if r := spec.RequestID(); r != "" {
-		rec.RequestID = r
+	b.mu.Unlock()
+
+	if err := b.run(ctx, b.o.SpawnCommand, spec.WorkerID, b.env(spec)); err != nil {
+		b.mu.Lock()
+		b.state[spec.WorkerID] = &previous
+		rollbackErr := b.saveLocked()
+		b.mu.Unlock()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == ExitWorkspaceMissing {
+			return errors.Join(fmt.Errorf("spawn hook exit %d: %w", ExitWorkspaceMissing, backend.ErrWorkspaceMissing), rollbackErr)
+		}
+		return errors.Join(err, rollbackErr)
 	}
-	return b.saveLocked()
+	return nil
 }
 
 func (b *Backend) RecordClaim(_ context.Context, workerID, requestID string) error {

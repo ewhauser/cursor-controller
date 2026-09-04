@@ -64,8 +64,11 @@ type Options struct {
 	APIKeySecretName string
 	APIKeySecretKey  string
 	APIURL           string
-	Log              *slog.Logger
-	Now              func() time.Time
+	// StartupTimeout is how long a non-ready pod may remain Pending, Running,
+	// or Unknown before the controller treats the worker as failed startup.
+	StartupTimeout time.Duration
+	Log            *slog.Logger
+	Now            func() time.Time
 }
 
 // Backend implements backend.Backend on Kubernetes.
@@ -92,6 +95,9 @@ func New(o Options) (*Backend, error) {
 	}
 	if o.APIKeySecretKey == "" {
 		o.APIKeySecretKey = "api-key"
+	}
+	if o.StartupTimeout <= 0 {
+		o.StartupTimeout = 10 * time.Minute
 	}
 	if o.Log == nil {
 		o.Log = slog.Default()
@@ -271,9 +277,14 @@ func (b *Backend) ListWorkers(ctx context.Context) ([]backend.WorkerInfo, error)
 		}
 		w.CreatedAt = earliest(w.CreatedAt, p.CreationTimestamp.Time)
 		w.LastActivity = latest(w.LastActivity, p.CreationTimestamp.Time, parseTime(p.Annotations[AnnLastClaimedAt]), podFinishedAt(p))
-		live := isLive(p)
+		live, startupTimedOut := b.podState(p)
 		if w.Live == nil || live {
 			w.Live = &live
+		}
+		if live {
+			w.StartupTimedOut = false
+		} else if startupTimedOut && (w.Live == nil || !*w.Live) {
+			w.StartupTimedOut = true
 		}
 	}
 	out := make([]backend.WorkerInfo, 0, len(byID))
@@ -504,6 +515,27 @@ func isLive(p *corev1.Pod) bool {
 		return false
 	}
 	return true
+}
+
+func (b *Backend) podState(p *corev1.Pod) (live, startupTimedOut bool) {
+	if !isLive(p) {
+		return false, false
+	}
+	for _, condition := range p.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true, false
+		}
+	}
+	started := p.CreationTimestamp.Time
+	for _, condition := range p.Status.Conditions {
+		if condition.Status != corev1.ConditionTrue {
+			started = latest(started, condition.LastTransitionTime.Time)
+		}
+	}
+	if started.IsZero() || b.o.StartupTimeout <= 0 || b.o.Now().Sub(started) < b.o.StartupTimeout {
+		return true, false
+	}
+	return false, true
 }
 
 func podFinishedAt(p *corev1.Pod) time.Time {

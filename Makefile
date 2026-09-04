@@ -13,6 +13,9 @@ test:
 vet:
 	go vet ./...
 
+lint: vet
+	test -z "$$(gofmt -l .)"
+
 image:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) .
 

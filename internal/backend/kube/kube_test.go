@@ -235,3 +235,65 @@ func TestSpawnRefusesForeignPVC(t *testing.T) {
 		t.Fatal("expected error for foreign pvc")
 	}
 }
+
+func TestListWorkersMarksStalledPodForStartupCleanup(t *testing.T) {
+	b, cs := newBackend(t, true)
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	b.o.Now = func() time.Time { return now }
+	b.o.StartupTimeout = 10 * time.Minute
+	ctx := context.Background()
+	if err := b.Spawn(ctx, backend.Spec{
+		WorkerID: "cc-stalled000000",
+		Pool:     "gpu",
+		Request:  &cursorapi.PendingRequest{ID: "bc-stalled"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pods, err := cs.CoreV1().Pods("cursord").List(ctx, metav1.ListOptions{LabelSelector: LabelWorkerID + "=cc-stalled000000"})
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("pods: %v %+v", err, pods.Items)
+	}
+	p := pods.Items[0]
+	p.CreationTimestamp = metav1.NewTime(now.Add(-11 * time.Minute))
+	p.Status.Phase = corev1.PodPending
+	if _, err := cs.CoreV1().Pods("cursord").Update(ctx, &p, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	workers, err := b.ListWorkers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workers) != 1 || !workers[0].StartupTimedOut || workers[0].Live == nil || *workers[0].Live {
+		t.Fatalf("stalled worker must be non-live and marked timed out: %+v", workers)
+	}
+}
+
+func TestPodStartupDeadlineAppliesUntilReady(t *testing.T) {
+	b, _ := newBackend(t, false)
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	b.o.Now = func() time.Time { return now }
+	b.o.StartupTimeout = 10 * time.Minute
+	old := metav1.NewTime(now.Add(-11 * time.Minute))
+	recent := metav1.NewTime(now.Add(-time.Minute))
+
+	tests := []struct {
+		name     string
+		pod      corev1.Pod
+		live     bool
+		timedOut bool
+	}{
+		{name: "old pending", pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: old}, Status: corev1.PodStatus{Phase: corev1.PodPending}}, timedOut: true},
+		{name: "old running but unready", pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: old}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}, timedOut: true},
+		{name: "recent pending", pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: recent}, Status: corev1.PodStatus{Phase: corev1.PodPending}}, live: true},
+		{name: "ready", pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: old}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}, live: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			live, timedOut := b.podState(&tt.pod)
+			if live != tt.live || timedOut != tt.timedOut {
+				t.Fatalf("state=(live=%v timedOut=%v), want (%v %v)", live, timedOut, tt.live, tt.timedOut)
+			}
+		})
+	}
+}

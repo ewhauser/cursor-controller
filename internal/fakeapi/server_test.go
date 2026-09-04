@@ -2,6 +2,7 @@ package fakeapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"testing"
@@ -80,10 +81,16 @@ func TestFakeLifecycle(t *testing.T) {
 		t.Fatalf("offline claim not listed: %+v", reqs)
 	}
 	var types []string
+	var claimedData map[string]any
 	sctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	err = api.StreamPendingRequests(sctx, cursorapi.StreamOptions{Pool: "gpu", Cursor: cursor}, func(e cursorapi.Event) error {
 		if e.Type != cursorapi.EventHeartbeat {
 			types = append(types, e.Type)
+		}
+		if e.Type == cursorapi.EventClaimed {
+			if err := json.Unmarshal([]byte(e.Data), &claimedData); err != nil {
+				t.Errorf("decode claimed payload: %v", err)
+			}
 		}
 		if e.Type == cursorapi.EventClaimedOffline {
 			r, err := cursorapi.DecodeRequest(e.Data)
@@ -100,6 +107,9 @@ func TestFakeLifecycle(t *testing.T) {
 	}
 	if len(types) != 2 || types[0] != cursorapi.EventClaimed || types[1] != cursorapi.EventClaimedOffline {
 		t.Fatalf("stream types = %v", types)
+	}
+	if _, ok := claimedData["workerId"]; ok || claimedData["id"] != id {
+		t.Fatalf("claimed payload must match Cursor's id-only contract: %+v", claimedData)
 	}
 
 	// Release re-queues and emits created; expired cursor -> 410.

@@ -92,3 +92,25 @@ echo "spawned $CURSOR_AGENT_WORKER_ID"
 		t.Fatalf("workers after dispose = %+v", workers)
 	}
 }
+
+func TestSpawnDoesNotRunHookWhenStateCannotBePersisted(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "spawned")
+	spawn := writeScript(t, dir, "spawn.sh", `touch "`+marker+`"`)
+
+	b, err := New(Options{
+		SpawnCommand:   spawn,
+		StateFile:      filepath.Join(dir, "missing", "state.json"),
+		WorkerIDPrefix: "cc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = b.Spawn(context.Background(), backend.Spec{WorkerID: "cc-1", Pool: "gpu"})
+	if err == nil {
+		t.Fatal("expected state persistence failure")
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("spawn hook ran before durable state was recorded: %v", statErr)
+	}
+}

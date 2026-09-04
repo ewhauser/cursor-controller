@@ -116,7 +116,7 @@ func TestGetAgentAndWorker(t *testing.T) {
 		case "/v0/private-workers/w-1":
 			_ = json.NewEncoder(w).Encode(Worker{WorkerID: "w-1", IsInUse: true})
 		case "/v0/private-workers/pools":
-			_, _ = w.Write([]byte(`{"pools":[{"scope":"team","poolName":"gpu","connectedWorkerCount":3,"inUseWorkerCount":1}]}`))
+			_, _ = w.Write([]byte(`{"pools":[{"scope":"team","poolName":"gpu","repoUrl":"https://github.com/a/one","connectedWorkerCount":9,"inUseWorkerCount":9},{"scope":"team","poolName":"gpu","repoUrl":"https://github.com/a/two","connectedWorkerCount":3,"inUseWorkerCount":1}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -135,12 +135,80 @@ func TestGetAgentAndWorker(t *testing.T) {
 	if err != nil || !wk.IsInUse {
 		t.Fatalf("worker: %v %+v", err, wk)
 	}
-	p, err := c.GetPool(ctx, "gpu")
+	p, err := c.GetPoolForRepository(ctx, "gpu", "https://github.com/a/two")
 	if err != nil || p.IdleWorkerCount() != 2 {
 		t.Fatalf("pool: %v %+v", err, p)
 	}
+	if _, err := c.GetPoolForRepository(ctx, "gpu", "https://github.com/a/missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing repository pool: %v", err)
+	}
 	if _, err := c.GetPool(ctx, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing pool: %v", err)
+	}
+}
+
+func TestListAllWorkersPaginates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/private-workers" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("status") != "all" || r.URL.Query().Get("scope") != "team_pool" {
+			t.Errorf("filters = %s", r.URL.RawQuery)
+		}
+		switch r.URL.Query().Get("pageToken") {
+		case "":
+			_ = json.NewEncoder(w).Encode(WorkersPage{Workers: []Worker{{WorkerID: "w1", ActiveBcID: "bc1"}}, NextPageToken: "p2"})
+		case "p2":
+			_ = json.NewEncoder(w).Encode(WorkersPage{Workers: []Worker{{WorkerID: "w2"}}})
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "key")
+	workers, err := c.ListAllWorkers(context.Background(), WorkerListOptions{Status: "all", Scope: "team_pool", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workers) != 2 || workers[0].ActiveBcID != "bc1" || workers[1].WorkerID != "w2" {
+		t.Fatalf("workers = %+v", workers)
+	}
+}
+
+func TestOrdinaryRequestsHaveDeadline(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "key", WithRequestTimeout(20*time.Millisecond))
+	begin := time.Now()
+	_, err := c.ListPools(context.Background(), "", false)
+	if err == nil || time.Since(begin) > time.Second {
+		t.Fatalf("ordinary request did not honor configured timeout: elapsed=%s err=%v", time.Since(begin), err)
+	}
+	<-started
+}
+
+func TestRequestTimeoutDoesNotCutOffSSEStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(30 * time.Millisecond)
+		_, _ = w.Write([]byte("event: heartbeat\ndata: {}\n\n"))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "key", WithRequestTimeout(5*time.Millisecond))
+	seen := false
+	err := c.StreamPendingRequests(context.Background(), StreamOptions{}, func(e Event) error {
+		seen = e.Type == EventHeartbeat
+		return nil
+	})
+	if err != nil || !seen {
+		t.Fatalf("SSE stream was cut off by ordinary request timeout: seen=%v err=%v", seen, err)
 	}
 }
 

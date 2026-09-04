@@ -34,6 +34,7 @@ Roughly: list → claim → spawn, stream → wake, tick → dispose.
     │ GET  /v0/private-workers/pending-requests/stream     │
     │ POST /v0/private-workers/claim                       │
     │ POST /v0/private-workers/claims/{id}/release         │
+    │ GET  /v0/private-workers  (warm claim reconciliation) │
     │ GET  /v1/agents/{id}   (ARCHIVED? → dispose)         │
     └───────────────▲──────────────────────────────────────┘
                     │
@@ -62,6 +63,9 @@ Roughly: list → claim → spawn, stream → wake, tick → dispose.
 4. The worker connects with that id, Cursor attaches the session, the agent
    runs. After `--idle-release-timeout` the worker exits 0, the Pod goes
    `Succeeded`, and Kubernetes detaches the volume. The PVC stays.
+   Warm workers are associated with their request by reconciling Cursor's
+   connected-worker `activeBcId`; the `claimed` stream event itself contains
+   only the request id.
 5. The user sends a follow-up hours later. Cursor emits `claimed_offline` with
    `claimedWorkerId` and `wakeTimeoutMs`. The controller finds the PVC, deletes
    the terminal Pod, creates a new Pod for the same worker id with
@@ -137,6 +141,9 @@ kubectl -n cursord get pods,pvc -l app.kubernetes.io/managed-by=cursor-controlle
 | `pools` | `[default]` | Pools to serve. Empty list watches every pool the key can see. |
 | `controller.warmIdle` | `0` | Idle workers to keep connected per pool (needs `pools`). |
 | `controller.workerIdPrefix` | `cc` | Prefix on minted worker ids; also ownership marker. Use a different prefix per cluster/controller. |
+| `controller.apiTimeout` | `30s` | Deadline for ordinary Cursor JSON API calls; SSE is bounded by the resync interval. |
+| `controller.wakeRetryInterval` | `2s` | Delay between transient wake retries inside Cursor's wake window. |
+| `controller.workerStartupTimeout` | `10m` | Delete and release a worker that never reaches Kubernetes Ready. |
 | `persistence.enabled` | `false` | Retained PVC per worker. |
 | `persistence.claimSpec` | gp3 / 100Gi | Raw PVC spec, usually with a `VolumeSnapshot` dataSource. |
 | `gc.disposeAfter` | `168h` | Hard TTL for offline workers. |
@@ -187,7 +194,7 @@ The spawn script receives the same environment as
 | `CURSOR_WAKE=1` | wake | Restart an existing worker on its workspace. |
 | `CURSOR_WAKE_TIMEOUT_MS` | wake | How long Cursor waits for it to reconnect. |
 | `CURSOR_SPAWN_KIND` | always | `claim`, `wake`, or `warm`. |
-| `CURSOR_DISPOSE_REASON` | dispose | `ttl`, `agent_archived`, `agent_deleted`, `unclaimed`. |
+| `CURSOR_DISPOSE_REASON` | dispose | `ttl`, `agent_archived`, `agent_deleted`, `unclaimed`, `startup_timeout`. |
 
 Exit `66` from a wake to signal the workspace is gone; the controller releases
 the claim. Liveness for hook workers is checked through
@@ -209,8 +216,10 @@ the claim. Liveness for hook workers is checked through
   the controller do it: `Dispose` removes pods before the claim. A wake that
   finds a terminating PVC releases the claim so Cursor re-queues the request.
 - **Stuck wakes.** If a wake keeps failing (volume topology, quota), the
-  request stays claimed until the pool's `workerReadyTimeoutSeconds` lapses
-  and Cursor reassigns it. The controller re-attempts on every re-list.
+  controller retries inside the pool's `workerReadyTimeoutSeconds` window,
+  then re-attempts if Cursor lists the request again. A worker Pod that never
+  becomes Ready is removed after `--worker-startup-timeout`; its claim is
+  released so the request can be reassigned.
 - **Auth.** A `401`/`403` from the fleet API exits the process by default
   (`--exit-on-auth-error`) so a bad key shows up as a crash loop, not silence.
   Pool workers require a *team service-account* key; personal keys are rejected.
@@ -245,8 +254,10 @@ terminal, then start the controller with `--api-url http://localhost:8081
 --api-key dev`, and inject work with
 `curl -X POST localhost:8081/fake/requests -d '{"pool":"default"}'`.
 
-**Against real Cursor.** The payload shapes for `claimed_offline` and
-`claimed` events were inferred from the docs. Run
+**Against real Cursor.** The decoders follow the published event contracts:
+`claimed_offline` carries the request and worker metadata, while `claimed`
+carries only the request id. The latter is mapped back to a warm worker using
+the connected-worker inventory's `activeBcId`. Run
 `CURSOR_API_KEY=... POOL=<dev-pool> ./hack/capture-fixtures.sh` once against
 a dev pool while starting an agent and sending a follow-up; it stores the
 responses under `internal/cursorapi/testdata`, and the fixture tests then

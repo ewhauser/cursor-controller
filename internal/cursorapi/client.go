@@ -19,11 +19,12 @@ type Observer func(method, path string, status int, d time.Duration)
 
 // Client talks to the Cursor fleet API.
 type Client struct {
-	baseURL   string
-	apiKey    string
-	http      *http.Client
-	userAgent string
-	observe   Observer
+	baseURL        string
+	apiKey         string
+	http           *http.Client
+	userAgent      string
+	observe        Observer
+	requestTimeout time.Duration
 }
 
 // Option configures a Client.
@@ -39,16 +40,22 @@ func WithUserAgent(ua string) Option { return func(c *Client) { c.userAgent = ua
 // WithObserver registers a metrics hook.
 func WithObserver(o Observer) Option { return func(c *Client) { c.observe = o } }
 
+// WithRequestTimeout bounds ordinary JSON API calls. It does not apply to the
+// SSE stream, which is bounded separately by the controller's resync context.
+// A non-positive duration disables the per-request timeout.
+func WithRequestTimeout(d time.Duration) Option { return func(c *Client) { c.requestTimeout = d } }
+
 // New creates a Client. baseURL defaults to DefaultBaseURL when empty.
 func New(baseURL, apiKey string, opts ...Option) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
 	c := &Client{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		apiKey:    apiKey,
-		http:      &http.Client{},
-		userAgent: "cursor-controller",
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		apiKey:         apiKey,
+		http:           &http.Client{},
+		userAgent:      "cursor-controller",
+		requestTimeout: 30 * time.Second,
 	}
 	for _, o := range opts {
 		o(c)
@@ -87,6 +94,11 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query url.
 
 // do performs the request and decodes a JSON body into out (if non-nil).
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	if c.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.requestTimeout)
+		defer cancel()
+	}
 	req, err := c.newRequest(ctx, method, path, query, body)
 	if err != nil {
 		return err
@@ -301,14 +313,23 @@ func (c *Client) ListPools(ctx context.Context, scope string, includeStale bool)
 
 // GetPool finds a pool by name (any scope). Returns ErrNotFound if absent.
 func (c *Client) GetPool(ctx context.Context, name string) (*Pool, error) {
+	return c.GetPoolForRepository(ctx, name, "")
+}
+
+// GetPoolForRepository finds a pool by name and, when supplied, exact
+// repository URL. Returns ErrNotFound if the matching row is absent.
+func (c *Client) GetPoolForRepository(ctx context.Context, name, repository string) (*Pool, error) {
 	pools, err := c.ListPools(ctx, "", true)
 	if err != nil {
 		return nil, err
 	}
 	for i := range pools {
-		if pools[i].PoolName == name {
+		if pools[i].PoolName == name && (repository == "" || pools[i].RepoURL == repository) {
 			return &pools[i], nil
 		}
+	}
+	if repository != "" {
+		return nil, fmt.Errorf("pool %q for repository %q: %w", name, repository, ErrNotFound)
 	}
 	return nil, fmt.Errorf("pool %q: %w", name, ErrNotFound)
 }
@@ -341,6 +362,26 @@ func (c *Client) ListWorkers(ctx context.Context, opts WorkerListOptions) (*Work
 		return nil, err
 	}
 	return &page, nil
+}
+
+// ListAllWorkers returns every connected worker across paginated responses.
+func (c *Client) ListAllWorkers(ctx context.Context, opts WorkerListOptions) ([]Worker, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	var workers []Worker
+	for pageNumber := 0; pageNumber < 100; pageNumber++ {
+		page, err := c.ListWorkers(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		workers = append(workers, page.Workers...)
+		if page.NextPageToken == "" {
+			return workers, nil
+		}
+		opts.PageToken = page.NextPageToken
+	}
+	return nil, errors.New("list workers exceeded 100 pages")
 }
 
 // GetWorker returns a connected worker by id. Returns ErrNotFound when the

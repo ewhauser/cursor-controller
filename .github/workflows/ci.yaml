@@ -63,7 +63,7 @@ jobs:
           kubectl -n cursord logs deploy/fake-cursor-api --tail=100
 
   image:
-    needs: [test, helm, local-e2e]
+    needs: [test, helm, local-e2e, kind-e2e]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:

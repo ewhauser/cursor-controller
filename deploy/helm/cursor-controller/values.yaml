@@ -25,6 +25,8 @@ repository: ""
 
 controller:
   apiUrl: https://api.cursor.com
+  # Deadline for ordinary JSON API calls. SSE streams use resyncInterval.
+  apiTimeout: 30s
   # Prefix for minted worker ids; also how the controller recognises its own
   # workers. Lowercase alphanumerics and dashes, <= 40 chars.
   workerIdPrefix: cc
@@ -32,6 +34,10 @@ controller:
   warmIdle: 0
   warmInterval: 1m
   resyncInterval: 4m
+  # Retry transient backend wake failures while Cursor is waiting.
+  wakeRetryInterval: 2s
+  # Remove worker pods that never become ready before this deadline.
+  workerStartupTimeout: 10m
   logLevel: info
   logFormat: json
   # Extra CLI args appended verbatim.

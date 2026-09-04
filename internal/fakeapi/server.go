@@ -392,7 +392,9 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 		s.workers[body.WorkerID] = &Worker{ID: body.WorkerID, Pool: req.pool()}
 	}
 	s.claims = append(s.claims, body.ID+"@"+body.WorkerID)
-	s.emitLocked(cursorapi.EventClaimed, map[string]string{"id": req.ID, "workerId": body.WorkerID})
+	// Cursor's claimed event contains only the request id. Controllers recover
+	// the warm worker through GET /private-workers activeBcId.
+	s.emitLocked(cursorapi.EventClaimed, map[string]string{"id": req.ID})
 	s.o.Log.Info("fakeapi: claimed", "request", req.ID, "worker", body.WorkerID)
 	writeJSON(w, http.StatusOK, cursorapi.Claim{ID: req.ID, WorkerID: body.WorkerID})
 }

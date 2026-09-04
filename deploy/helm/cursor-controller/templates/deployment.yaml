@@ -57,6 +57,7 @@ spec:
             - --worker-api-key-secret={{ include "cursor-controller.secretName" . }}
             - --worker-api-key-secret-key={{ .Values.auth.secretKey }}
             - --worker-id-prefix={{ .Values.controller.workerIdPrefix }}
+            - --api-timeout={{ .Values.controller.apiTimeout }}
             {{- range .Values.pools }}
             - --pool={{ . }}
             {{- end }}
@@ -66,6 +67,8 @@ spec:
             - --warm-idle={{ .Values.controller.warmIdle | int }}
             - --warm-interval={{ .Values.controller.warmInterval }}
             - --resync-interval={{ .Values.controller.resyncInterval }}
+            - --wake-retry-interval={{ .Values.controller.wakeRetryInterval }}
+            - --worker-startup-timeout={{ .Values.controller.workerStartupTimeout }}
             - --gc-interval={{ .Values.gc.interval }}
             - --dispose-after={{ .Values.gc.disposeAfter }}
             - --dispose-archived-after={{ .Values.gc.disposeArchivedAfter }}

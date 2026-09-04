@@ -65,6 +65,9 @@ type WorkerInfo struct {
 	// Live is true when a worker process/pod is running or starting. Nil means
 	// the backend cannot tell; the controller then asks the Cursor API.
 	Live *bool
+	// StartupTimedOut marks a worker whose process or pod never became ready
+	// within the backend's startup deadline. GC removes it immediately.
+	StartupTimedOut bool
 	// LastActivity is the most recent claim, wake, or process exit.
 	LastActivity time.Time
 	CreatedAt    time.Time

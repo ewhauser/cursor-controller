@@ -100,6 +100,7 @@ func run() error {
 	}
 	var (
 		apiURL           = fs.String("api-url", envOr("CURSOR_API_URL", envOr("CURSOR_API_ENDPOINT", cursorapi.DefaultBaseURL)), "Cursor fleet API base (CURSOR_API_URL)")
+		apiTimeout       = fs.Duration("api-timeout", envDuration("CONTROLLER_API_TIMEOUT", 30*time.Second), "Timeout for ordinary Cursor API requests; SSE is excluded (CONTROLLER_API_TIMEOUT)")
 		apiKey           = fs.String("api-key", os.Getenv("CURSOR_API_KEY"), "Team service-account API key (CURSOR_API_KEY)")
 		apiKeyFile       = fs.String("api-key-file", os.Getenv("CURSOR_API_KEY_FILE"), "Read the API key from this file (CURSOR_API_KEY_FILE)")
 		repository       = fs.String("repository", os.Getenv("CURSOR_REPOSITORY"), "Repository filter for repo-scoped keys (CURSOR_REPOSITORY)")
@@ -109,6 +110,7 @@ func run() error {
 		warmInterval     = fs.Duration("warm-interval", envDuration("CONTROLLER_WARM_INTERVAL", time.Minute), "Warm-idle reconcile period (CONTROLLER_WARM_INTERVAL)")
 		resync           = fs.Duration("resync-interval", envDuration("CONTROLLER_RESYNC_INTERVAL", 4*time.Minute), "Re-list pending requests at least this often (CONTROLLER_RESYNC_INTERVAL)")
 		reconnect        = fs.Duration("reconnect-delay", envDuration("CONTROLLER_RECONNECT_DELAY", 5*time.Second), "Pause after a stream error (CONTROLLER_RECONNECT_DELAY)")
+		wakeRetry        = fs.Duration("wake-retry-interval", envDuration("CONTROLLER_WAKE_RETRY_INTERVAL", 2*time.Second), "Pause between transient wake retries (CONTROLLER_WAKE_RETRY_INTERVAL)")
 		gcInterval       = fs.Duration("gc-interval", envDuration("CONTROLLER_GC_INTERVAL", 5*time.Minute), "Workspace garbage-collection period; 0 disables (CONTROLLER_GC_INTERVAL)")
 		disposeAfter     = fs.Duration("dispose-after", envDuration("CONTROLLER_DISPOSE_AFTER", 7*24*time.Hour), "Hard TTL: dispose offline workers idle this long; 0 disables (CONTROLLER_DISPOSE_AFTER)")
 		disposeArchived  = fs.Duration("dispose-archived-after", envDuration("CONTROLLER_DISPOSE_ARCHIVED_AFTER", time.Hour), "Dispose offline workers whose agent is archived or deleted once idle this long (CONTROLLER_DISPOSE_ARCHIVED_AFTER)")
@@ -136,6 +138,7 @@ func run() error {
 		workerContainer = fs.String("worker-container", envOr("CONTROLLER_WORKER_CONTAINER", ""), "Container in the pod template that receives env and the workspace mount; default first (CONTROLLER_WORKER_CONTAINER)")
 		apiKeySecret    = fs.String("worker-api-key-secret", envOr("CONTROLLER_WORKER_API_KEY_SECRET", ""), "Secret name injected as CURSOR_API_KEY into worker pods (CONTROLLER_WORKER_API_KEY_SECRET)")
 		apiKeySecretKey = fs.String("worker-api-key-secret-key", envOr("CONTROLLER_WORKER_API_KEY_SECRET_KEY", "api-key"), "Key inside that Secret (CONTROLLER_WORKER_API_KEY_SECRET_KEY)")
+		workerStartup   = fs.Duration("worker-startup-timeout", envDuration("CONTROLLER_WORKER_STARTUP_TIMEOUT", 10*time.Minute), "Dispose non-ready worker pods after this startup deadline (CONTROLLER_WORKER_STARTUP_TIMEOUT)")
 
 		// hook backend
 		spawnCmd    = fs.String("spawn", os.Getenv("CONTROLLER_SPAWN"), "hook backend: script run per spawn/wake (CONTROLLER_SPAWN)")
@@ -197,7 +200,7 @@ func run() error {
 			return "cursor-api " + r.Method + " " + cursorapi.RouteTemplate(r.URL.Path)
 		}))
 	}
-	api := cursorapi.New(*apiURL, key, cursorapi.WithObserver(m.ObserveAPI), cursorapi.WithUserAgent("cursor-controller/"+version), cursorapi.WithHTTPClient(httpClient))
+	api := cursorapi.New(*apiURL, key, cursorapi.WithObserver(m.ObserveAPI), cursorapi.WithUserAgent("cursor-controller/"+version), cursorapi.WithHTTPClient(httpClient), cursorapi.WithRequestTimeout(*apiTimeout))
 
 	var be backend.Backend
 	switch *backendKind {
@@ -218,6 +221,7 @@ func run() error {
 			APIKeySecretName: *apiKeySecret,
 			APIKeySecretKey:  *apiKeySecretKey,
 			APIURL:           *apiURL,
+			StartupTimeout:   *workerStartup,
 			Log:              log.With("backend", "kube"),
 		}
 		if *pvcTemplate != "" {
@@ -272,6 +276,7 @@ func run() error {
 		WarmInterval:          *warmInterval,
 		ResyncInterval:        *resync,
 		ReconnectDelay:        *reconnect,
+		WakeRetryInterval:     *wakeRetry,
 		GCInterval:            *gcInterval,
 		DisposeAfter:          *disposeAfter,
 		DisposeArchivedAfter:  *disposeArchived,
