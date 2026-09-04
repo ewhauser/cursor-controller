@@ -1,0 +1,10 @@
+apiVersion: v2
+name: cursor-controller
+description: Open-source controller for Cursor self-hosted pool workers on Kubernetes, with hibernation-safe retained workspaces and workspace garbage collection.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/ewhauser/cursor-controller
+sources:
+  - https://github.com/ewhauser/cursor-controller
+keywords: [cursor, cloud-agent, self-hosted, workers]

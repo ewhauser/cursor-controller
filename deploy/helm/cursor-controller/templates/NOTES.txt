@@ -1,0 +1,12 @@
+cursor-controller installed in namespace {{ .Release.Namespace }}.
+
+Pools: {{ .Values.pools | join ", " | default "(all)" }}
+Warm idle: {{ .Values.controller.warmIdle }}
+Persistence: {{ .Values.persistence.enabled }}{{ if .Values.persistence.enabled }} (mount {{ .Values.persistence.mountPath }}){{ end }}
+
+Watch it:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "cursor-controller.fullname" . }} -f
+  kubectl -n {{ .Release.Namespace }} get pods,pvc -l app.kubernetes.io/managed-by=cursor-controller
+
+If persistence is on, set a non-zero workerReadyTimeoutSeconds on the Cursor
+pool so hibernated workers get time to reschedule and reattach their volume.

@@ -1,0 +1,45 @@
+# Seed workspace: a PVC with a SEED file, snapshotted as `monorepo-latest`.
+# Stands in for the 30-minute EBS snapshot of the monorepo.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-seed
+  namespace: cursord
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: csi-hostpath-sc
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: workspace-seed-writer
+  namespace: cursord
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: busybox:1.36
+          command: ["sh", "-c", "mkdir -p /workspace/monorepo && echo \"seeded $(date -u +%FT%TZ)\" > /workspace/SEED && ls -la /workspace"]
+          volumeMounts:
+            - name: ws
+              mountPath: /workspace
+      volumes:
+        - name: ws
+          persistentVolumeClaim:
+            claimName: workspace-seed
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: monorepo-latest
+  namespace: cursord
+spec:
+  volumeSnapshotClassName: csi-hostpath-snapclass
+  source:
+    persistentVolumeClaimName: workspace-seed

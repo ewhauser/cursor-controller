@@ -1,0 +1,22 @@
+# Retained workspace PVC template for the kube backend.
+#
+# One claim is created per worker id (<worker-id>-ws), seeded from the named
+# VolumeSnapshot, mounted into every incarnation of that worker's pod, and
+# kept across hibernation. The controller deletes it when the agent is
+# archived/deleted (--dispose-archived-after) or after --dispose-after.
+#
+# Point dataSource.name at whatever your snapshot pipeline publishes; a
+# rolling name (e.g. `monorepo-latest`) that you re-point every 30 minutes
+# means new claims always start from the freshest snapshot.
+apiVersion: v1
+kind: PersistentVolumeClaim
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 200Gi
+  dataSource:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: monorepo-latest

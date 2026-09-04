@@ -1,0 +1,137 @@
+{{- $_ := include "cursor-controller.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cursor-controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cursor-controller.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  # One controller per pool set: claims are atomic server-side, but warm-idle
+  # reconciliation and GC assume a single actor.
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cursor-controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cursor-controller.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/templates: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.controller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cursor-controller.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.controller.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: {{ include "cursor-controller.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --backend=kube
+            - --pod-template=/etc/cursor-controller/pod-template.yaml
+            {{- if .Values.persistence.enabled }}
+            - --pvc-template=/etc/cursor-controller/pvc-template.yaml
+            - --workspace-mount-path={{ .Values.persistence.mountPath }}
+            {{- end }}
+            - --worker-api-key-secret={{ include "cursor-controller.secretName" . }}
+            - --worker-api-key-secret-key={{ .Values.auth.secretKey }}
+            - --worker-id-prefix={{ .Values.controller.workerIdPrefix }}
+            {{- range .Values.pools }}
+            - --pool={{ . }}
+            {{- end }}
+            {{- with .Values.repository }}
+            - --repository={{ . }}
+            {{- end }}
+            - --warm-idle={{ .Values.controller.warmIdle | int }}
+            - --warm-interval={{ .Values.controller.warmInterval }}
+            - --resync-interval={{ .Values.controller.resyncInterval }}
+            - --gc-interval={{ .Values.gc.interval }}
+            - --dispose-after={{ .Values.gc.disposeAfter }}
+            - --dispose-archived-after={{ .Values.gc.disposeArchivedAfter }}
+            - --dispose-unclaimed-after={{ .Values.gc.disposeUnclaimedAfter }}
+            - --dispose-check-agent={{ .Values.gc.checkAgent }}
+            - --metrics-addr=:{{ .Values.metrics.port }}
+            - --log-level={{ .Values.controller.logLevel }}
+            - --log-format={{ .Values.controller.logFormat }}
+            {{- range .Values.controller.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: CURSOR_API_URL
+              value: {{ .Values.controller.apiUrl | quote }}
+            - name: CURSOR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cursor-controller.secretName" . }}
+                  key: {{ .Values.auth.secretKey | quote }}
+            - name: CONTROLLER_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: templates
+              mountPath: /etc/cursor-controller
+              readOnly: true
+      volumes:
+        - name: templates
+          configMap:
+            name: {{ include "cursor-controller.templatesConfigMapName" . }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

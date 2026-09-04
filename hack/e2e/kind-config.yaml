@@ -1,0 +1,10 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: cursor-e2e
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # fake-cursor-api NodePort -> localhost:30080 for the e2e tests
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP

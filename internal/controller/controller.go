@@ -1,0 +1,597 @@
+// Package controller implements the claim/wake/warm/GC loops on top of the
+// Cursor fleet API and a backend.
+package controller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/ewhauser/cursor-controller/internal/backend"
+	"github.com/ewhauser/cursor-controller/internal/cursorapi"
+	"github.com/ewhauser/cursor-controller/internal/metrics"
+)
+
+// Config tunes the controller loops.
+type Config struct {
+	// Pools to watch. Empty watches every pool the key can see.
+	Pools []string
+	// Repository filter for repo-scoped service accounts (optional).
+	Repository string
+	// WorkerIDPrefix is used to mint ids and recognise our own workers.
+	WorkerIDPrefix string
+	// WarmIdle keeps this many idle workers connected per pool (0 = claim mode only).
+	WarmIdle int
+	// WarmInterval is the warm-idle reconcile period.
+	WarmInterval time.Duration
+	// ResyncInterval bounds how long one SSE stream is held before re-listing.
+	ResyncInterval time.Duration
+	// ReconnectDelay is the pause after a stream error before re-listing.
+	ReconnectDelay time.Duration
+	// GCInterval is the disposal reconcile period (0 disables GC).
+	GCInterval time.Duration
+	// DisposeAfter is the hard TTL: an offline worker idle this long is disposed
+	// whatever its agent status is (0 disables).
+	DisposeAfter time.Duration
+	// DisposeArchivedAfter disposes offline workers whose agent is ARCHIVED (or
+	// deleted) once idle this long. Only used when CheckAgent is true.
+	DisposeArchivedAfter time.Duration
+	// DisposeUnclaimedAfter disposes offline workers that never received a
+	// request (warm workers that idled out) after this long (0 disables).
+	DisposeUnclaimedAfter time.Duration
+	// CheckAgent queries GET /v1/agents/{id} during GC.
+	CheckAgent bool
+	// ExitOnAuthError makes Run return on 401/403 so the process restarts
+	// loudly instead of spinning.
+	ExitOnAuthError bool
+	// APIURL is passed to workers.
+	APIURL string
+}
+
+func (c *Config) defaults() {
+	if c.WorkerIDPrefix == "" {
+		c.WorkerIDPrefix = "cc"
+	}
+	if c.WarmInterval <= 0 {
+		c.WarmInterval = time.Minute
+	}
+	if c.ResyncInterval <= 0 {
+		c.ResyncInterval = 4 * time.Minute
+	}
+	if c.ReconnectDelay <= 0 {
+		c.ReconnectDelay = 5 * time.Second
+	}
+}
+
+// API is the subset of cursorapi.Client the controller needs (mockable).
+type API interface {
+	ListAllPendingRequests(ctx context.Context, opts cursorapi.ListOptions) ([]cursorapi.PendingRequest, string, error)
+	StreamPendingRequests(ctx context.Context, opts cursorapi.StreamOptions, fn func(cursorapi.Event) error) error
+	ClaimRequest(ctx context.Context, requestID, workerID string) (*cursorapi.Claim, error)
+	ReleaseClaim(ctx context.Context, requestID string) (*cursorapi.Claim, error)
+	GetPool(ctx context.Context, name string) (*cursorapi.Pool, error)
+	GetWorker(ctx context.Context, workerID string) (*cursorapi.Worker, error)
+	GetAgent(ctx context.Context, agentID string) (*cursorapi.Agent, error)
+}
+
+// ErrAuth is returned by Run when the API rejects the key and ExitOnAuthError is set.
+var ErrAuth = errors.New("cursor api rejected the api key")
+
+// Controller runs the loops.
+type Controller struct {
+	cfg     Config
+	api     API
+	backend backend.Backend
+	log     *slog.Logger
+	m       *metrics.Metrics
+	now     func() time.Time
+
+	inflight  sync.Map // request id or worker id -> struct{}
+	handlers  sync.WaitGroup
+	fatal     chan error
+	fatalOnce sync.Once
+
+	agentCheckDisabled bool
+	agentCheckMu       sync.Mutex
+}
+
+// New creates a Controller.
+func New(cfg Config, api API, be backend.Backend, log *slog.Logger, m *metrics.Metrics) *Controller {
+	cfg.defaults()
+	if log == nil {
+		log = slog.Default()
+	}
+	if m == nil {
+		m = metrics.New()
+	}
+	return &Controller{cfg: cfg, api: api, backend: be, log: log, m: m, now: time.Now, fatal: make(chan error, 1)}
+}
+
+// Run blocks until ctx is cancelled or a fatal error occurs.
+func (c *Controller) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	pools := c.cfg.Pools
+	if len(pools) == 0 {
+		pools = []string{""}
+	}
+	for _, pool := range pools {
+		wg.Add(1)
+		go func(pool string) { defer wg.Done(); c.watchLoop(ctx, pool) }(pool)
+		if c.cfg.WarmIdle > 0 && pool != "" {
+			wg.Add(1)
+			go func(pool string) { defer wg.Done(); c.warmLoop(ctx, pool) }(pool)
+		}
+	}
+	if c.cfg.GCInterval > 0 {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.gcLoop(ctx) }()
+	}
+	var err error
+	select {
+	case <-ctx.Done():
+	case err = <-c.fatal:
+		cancel()
+	}
+	wg.Wait()
+	c.handlers.Wait()
+	return err
+}
+
+func (c *Controller) abort(err error) {
+	c.fatalOnce.Do(func() { c.fatal <- err })
+}
+
+// authCheck reports auth failures and, when configured, aborts the run.
+func (c *Controller) authCheck(err error) {
+	if err == nil || !cursorapi.IsAuthError(err) {
+		return
+	}
+	c.log.Error("cursor api rejected the api key; pool workers need a team service-account key with agent scope", "err", err)
+	if c.cfg.ExitOnAuthError {
+		c.abort(fmt.Errorf("%w: %v", ErrAuth, err))
+	}
+}
+
+// handlerTimeout bounds one claim/spawn or wake attempt.
+const handlerTimeout = 5 * time.Minute
+
+// runHandler runs fn on a context detached from shutdown cancellation so an
+// in-flight spawn can finish (or release its claim) instead of being torn
+// down half-way, while still bounding it with a timeout.
+func runHandler(parent context.Context, fn func(ctx context.Context)) {
+	hctx, cancel := context.WithTimeout(context.WithoutCancel(parent), handlerTimeout)
+	defer cancel()
+	fn(hctx)
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// ---------------------------------------------------------------------------
+// watch loop: list -> handle -> stream -> repeat
+
+func (c *Controller) watchLoop(ctx context.Context, pool string) {
+	log := c.log.With("pool", poolLabel(pool))
+	backoff := time.Second
+	for ctx.Err() == nil {
+		reqs, cursor, err := c.api.ListAllPendingRequests(ctx, cursorapi.ListOptions{Pool: pool, Repository: c.cfg.Repository, Limit: 100})
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			c.m.ListRuns.WithLabelValues(poolLabel(pool), "error").Inc()
+			log.Error("list pending requests", "err", err)
+			c.authCheck(err)
+			if !sleepCtx(ctx, backoff) {
+				return
+			}
+			backoff = min(backoff*2, 30*time.Second)
+			continue
+		}
+		backoff = time.Second
+		c.m.ListRuns.WithLabelValues(poolLabel(pool), "ok").Inc()
+		c.m.SetReady(true)
+		log.Debug("listed pending requests", "count", len(reqs))
+		for i := range reqs {
+			r := &reqs[i]
+			runHandler(ctx, func(hctx context.Context) { c.handleRequest(hctx, r) })
+		}
+		if cursor == "" {
+			log.Warn("list response had no streamCursor; polling instead")
+			if !sleepCtx(ctx, c.cfg.ReconnectDelay) {
+				return
+			}
+			continue
+		}
+		cause := c.watchStream(ctx, pool, cursor)
+		if ctx.Err() != nil {
+			return
+		}
+		c.m.StreamReconnects.WithLabelValues(poolLabel(pool), cause).Inc()
+		if cause != "resync" && cause != "cursor_expired" {
+			if !sleepCtx(ctx, c.cfg.ReconnectDelay) {
+				return
+			}
+		}
+	}
+}
+
+// watchStream holds the SSE stream for at most ResyncInterval and returns the
+// reason it stopped: resync, cursor_expired, closed, or error.
+func (c *Controller) watchStream(ctx context.Context, pool, cursor string) string {
+	log := c.log.With("pool", poolLabel(pool))
+	sctx, cancel := context.WithTimeout(ctx, c.cfg.ResyncInterval)
+	defer cancel()
+	log.Debug("opening pending-request stream")
+	err := c.api.StreamPendingRequests(sctx, cursorapi.StreamOptions{Pool: pool, Repository: c.cfg.Repository, Cursor: cursor}, func(ev cursorapi.Event) error {
+		c.handleEvent(ctx, pool, ev)
+		return nil
+	})
+	switch {
+	case err == nil:
+		log.Info("stream closed by server; re-listing")
+		return "closed"
+	case errors.Is(sctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil:
+		log.Debug("resync interval elapsed; re-listing")
+		return "resync"
+	case errors.Is(err, cursorapi.ErrCursorExpired):
+		log.Info("stream cursor expired; re-listing")
+		return "cursor_expired"
+	case ctx.Err() != nil:
+		return "shutdown"
+	default:
+		log.Error("stream error; re-listing", "err", err)
+		c.authCheck(err)
+		return "error"
+	}
+}
+
+func (c *Controller) handleEvent(ctx context.Context, pool string, ev cursorapi.Event) {
+	log := c.log.With("pool", poolLabel(pool), "event", ev.Type)
+	switch ev.Type {
+	case cursorapi.EventCreated, cursorapi.EventClaimedOffline:
+		r, err := cursorapi.DecodeRequest(ev.Data)
+		if err != nil {
+			log.Warn("undecodable event payload", "err", err, "data", truncate(ev.Data, 300))
+			return
+		}
+		if ev.Type == cursorapi.EventClaimedOffline && r.ClaimedWorkerID == "" {
+			log.Warn("claimed_offline event without claimedWorkerId", "request", r.ID)
+			return
+		}
+		// Handle off the stream goroutine so a slow spawn (image pull, hook
+		// script) never stalls event delivery. The in-flight guard dedupes.
+		c.handlers.Add(1)
+		go func() {
+			defer c.handlers.Done()
+			runHandler(ctx, func(hctx context.Context) { c.handleRequest(hctx, r) })
+		}()
+	case cursorapi.EventClaimed:
+		e, err := cursorapi.DecodeClaimEvent(ev.Data)
+		if err != nil {
+			log.Warn("undecodable claimed payload", "err", err)
+			return
+		}
+		if e.WorkerID != "" && c.backend.Owns(e.WorkerID) {
+			if err := c.backend.RecordClaim(ctx, e.WorkerID, e.ID); err != nil {
+				log.Warn("record claim", "worker", e.WorkerID, "request", e.ID, "err", err)
+			} else {
+				log.Info("request claimed by our worker", "worker", e.WorkerID, "request", e.ID)
+			}
+		}
+	case cursorapi.EventExpired:
+		log.Info("request expired", "data", truncate(ev.Data, 200))
+	case cursorapi.EventHeartbeat, "":
+	default:
+		log.Debug("ignoring event")
+	}
+}
+
+// handleRequest routes one pending request: wake for offline claims we own,
+// claim-then-spawn otherwise.
+func (c *Controller) handleRequest(ctx context.Context, r *cursorapi.PendingRequest) {
+	if r.IsOfflineClaim() {
+		c.wake(ctx, r)
+		return
+	}
+	c.claimAndSpawn(ctx, r)
+}
+
+func (c *Controller) claimAndSpawn(ctx context.Context, r *cursorapi.PendingRequest) {
+	pool := r.Pool()
+	log := c.log.With("request", r.ID, "pool", pool)
+	if _, busy := c.inflight.LoadOrStore("req:"+r.ID, struct{}{}); busy {
+		return
+	}
+	defer c.inflight.Delete("req:" + r.ID)
+
+	workerID := backend.NewWorkerID(c.cfg.WorkerIDPrefix)
+	if _, err := c.api.ClaimRequest(ctx, r.ID, workerID); err != nil {
+		switch {
+		case errors.Is(err, cursorapi.ErrConflict):
+			c.m.Claims.WithLabelValues(pool, "conflict").Inc()
+			log.Debug("request already claimed")
+		case errors.Is(err, cursorapi.ErrNotFound):
+			c.m.Claims.WithLabelValues(pool, "gone").Inc()
+			log.Debug("request no longer pending")
+		default:
+			c.m.Claims.WithLabelValues(pool, "error").Inc()
+			log.Error("claim failed", "err", err)
+			c.authCheck(err)
+		}
+		return
+	}
+	c.m.Claims.WithLabelValues(pool, "claimed").Inc()
+	log = log.With("worker", workerID)
+	log.Info("claimed request; spawning worker", "repo", r.RepoURL, "user", r.UserID)
+
+	spec := backend.Spec{WorkerID: workerID, Pool: pool, Kind: backend.KindClaim, Request: r, APIURL: c.cfg.APIURL}
+	if err := c.backend.Spawn(ctx, spec); err != nil {
+		c.m.Spawns.WithLabelValues(pool, string(backend.KindClaim), "error").Inc()
+		log.Error("spawn failed; releasing claim", "err", err)
+		c.release(ctx, r.ID, "spawn_failed")
+		return
+	}
+	c.m.Spawns.WithLabelValues(pool, string(backend.KindClaim), "ok").Inc()
+}
+
+func (c *Controller) wake(ctx context.Context, r *cursorapi.PendingRequest) {
+	pool := r.Pool()
+	workerID := r.ClaimedWorkerID
+	log := c.log.With("request", r.ID, "pool", pool, "worker", workerID)
+	if !c.backend.Owns(workerID) {
+		c.m.Wakes.WithLabelValues(pool, "foreign").Inc()
+		log.Debug("offline claim belongs to a worker we did not mint; ignoring")
+		return
+	}
+	if _, busy := c.inflight.LoadOrStore("wake:"+workerID, struct{}{}); busy {
+		return
+	}
+	defer c.inflight.Delete("wake:" + workerID)
+
+	log.Info("waking hibernated worker", "wake_timeout", r.WakeTimeout())
+	spec := backend.Spec{WorkerID: workerID, Pool: pool, Kind: backend.KindWake, Request: r, WakeTimeout: r.WakeTimeout(), APIURL: c.cfg.APIURL}
+	err := c.backend.Wake(ctx, spec)
+	switch {
+	case err == nil:
+		c.m.Wakes.WithLabelValues(pool, "woken").Inc()
+		c.m.Spawns.WithLabelValues(pool, string(backend.KindWake), "ok").Inc()
+	case errors.Is(err, backend.ErrWorkspaceMissing), errors.Is(err, backend.ErrUnknownWorker):
+		c.m.Wakes.WithLabelValues(pool, "missing").Inc()
+		log.Warn("cannot wake worker; releasing claim so Cursor re-queues the request", "err", err)
+		c.release(ctx, r.ID, "workspace_missing")
+	default:
+		c.m.Wakes.WithLabelValues(pool, "error").Inc()
+		c.m.Spawns.WithLabelValues(pool, string(backend.KindWake), "error").Inc()
+		log.Error("wake failed; will retry on next list", "err", err)
+	}
+}
+
+func (c *Controller) release(ctx context.Context, requestID, reason string) {
+	if _, err := c.api.ReleaseClaim(ctx, requestID); err != nil && !errors.Is(err, cursorapi.ErrNotFound) {
+		c.m.Releases.WithLabelValues(reason + "_failed").Inc()
+		c.log.Error("release claim", "request", requestID, "reason", reason, "err", err)
+		return
+	}
+	c.m.Releases.WithLabelValues(reason).Inc()
+}
+
+// ---------------------------------------------------------------------------
+// warm-idle loop
+
+func (c *Controller) warmLoop(ctx context.Context, pool string) {
+	log := c.log.With("pool", pool)
+	for {
+		c.reconcileWarm(ctx, pool, log)
+		if !sleepCtx(ctx, c.cfg.WarmInterval) {
+			return
+		}
+	}
+}
+
+// reconcileWarm spawns enough workers to reach WarmIdle idle workers, counting
+// pods that are still starting so back-to-back ticks do not over-spawn.
+func (c *Controller) reconcileWarm(ctx context.Context, pool string, log *slog.Logger) {
+	p, err := c.api.GetPool(ctx, pool)
+	if err != nil {
+		if errors.Is(err, cursorapi.ErrNotFound) {
+			p = &cursorapi.Pool{PoolName: pool}
+		} else {
+			log.Error("warm: get pool", "err", err)
+			c.authCheck(err)
+			return
+		}
+	}
+	starting := 0
+	if workers, err := c.backend.ListWorkers(ctx); err == nil {
+		for _, w := range workers {
+			if w.Pool == pool && w.RequestID == "" && w.Live != nil && *w.Live && c.now().Sub(w.CreatedAt) < 5*time.Minute {
+				starting++
+			}
+		}
+	} else {
+		log.Warn("warm: list workers", "err", err)
+	}
+	deficit := c.cfg.WarmIdle - p.IdleWorkerCount() - starting
+	c.m.WarmDeficit.WithLabelValues(pool).Set(float64(deficit))
+	if deficit <= 0 {
+		return
+	}
+	log.Info("warm: spawning idle workers", "deficit", deficit, "idle", p.IdleWorkerCount(), "starting", starting)
+	for i := 0; i < deficit && ctx.Err() == nil; i++ {
+		spec := backend.Spec{WorkerID: backend.NewWorkerID(c.cfg.WorkerIDPrefix), Pool: pool, Kind: backend.KindWarm, APIURL: c.cfg.APIURL}
+		if err := c.backend.Spawn(ctx, spec); err != nil {
+			c.m.Spawns.WithLabelValues(pool, string(backend.KindWarm), "error").Inc()
+			log.Error("warm: spawn failed", "worker", spec.WorkerID, "err", err)
+			return
+		}
+		c.m.Spawns.WithLabelValues(pool, string(backend.KindWarm), "ok").Inc()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// garbage collection
+
+func (c *Controller) gcLoop(ctx context.Context) {
+	for {
+		if !sleepCtx(ctx, c.cfg.GCInterval) {
+			return
+		}
+		if err := c.RunGC(ctx); err != nil {
+			c.m.GCErrors.Inc()
+			c.log.Error("gc pass failed", "err", err)
+		}
+	}
+}
+
+// Disposal reasons.
+const (
+	ReasonTTL           = "ttl"
+	ReasonAgentArchived = "agent_archived"
+	ReasonAgentDeleted  = "agent_deleted"
+	ReasonUnclaimed     = "unclaimed"
+)
+
+// RunGC performs one disposal pass.
+func (c *Controller) RunGC(ctx context.Context) error {
+	c.m.GCRuns.Inc()
+	workers, err := c.backend.ListWorkers(ctx)
+	if err != nil {
+		return err
+	}
+	var live, idle, unknown int
+	for _, w := range workers {
+		if !c.backend.Owns(w.ID) {
+			continue
+		}
+		isLive, known := c.liveness(ctx, w)
+		if !known {
+			unknown++
+			continue
+		}
+		if isLive {
+			live++
+			continue
+		}
+		idle++
+		reason := c.disposeReason(ctx, w)
+		if reason == "" {
+			continue
+		}
+		log := c.log.With("worker", w.ID, "request", w.RequestID, "pool", w.Pool, "reason", reason, "idle", c.now().Sub(w.LastActivity).Round(time.Second))
+		if err := c.backend.Dispose(ctx, w.ID, reason); err != nil {
+			c.m.Disposals.WithLabelValues(reason, "error").Inc()
+			log.Error("dispose failed", "err", err)
+			continue
+		}
+		c.m.Disposals.WithLabelValues(reason, "ok").Inc()
+		log.Info("disposed worker")
+	}
+	c.m.Workers.WithLabelValues("live").Set(float64(live))
+	c.m.Workers.WithLabelValues("idle").Set(float64(idle))
+	c.m.Workers.WithLabelValues("unknown").Set(float64(unknown))
+	return nil
+}
+
+// liveness uses the backend's view when it has one, else asks Cursor whether
+// the worker is connected.
+func (c *Controller) liveness(ctx context.Context, w backend.WorkerInfo) (live, known bool) {
+	if w.Live != nil {
+		return *w.Live, true
+	}
+	_, err := c.api.GetWorker(ctx, w.ID)
+	switch {
+	case err == nil:
+		return true, true
+	case errors.Is(err, cursorapi.ErrNotFound):
+		return false, true
+	default:
+		c.log.Warn("gc: get worker", "worker", w.ID, "err", err)
+		c.authCheck(err)
+		return false, false
+	}
+}
+
+// disposeReason decides whether an offline worker should be disposed now.
+func (c *Controller) disposeReason(ctx context.Context, w backend.WorkerInfo) string {
+	last := w.LastActivity
+	if last.IsZero() {
+		last = w.CreatedAt
+	}
+	if last.IsZero() {
+		return ""
+	}
+	idle := c.now().Sub(last)
+	if c.cfg.DisposeAfter > 0 && idle >= c.cfg.DisposeAfter {
+		return ReasonTTL
+	}
+	if w.RequestID == "" {
+		if c.cfg.DisposeUnclaimedAfter > 0 && idle >= c.cfg.DisposeUnclaimedAfter {
+			return ReasonUnclaimed
+		}
+		return ""
+	}
+	if !c.cfg.CheckAgent || c.agentChecksDisabled() || idle < c.cfg.DisposeArchivedAfter {
+		return ""
+	}
+	agent, err := c.api.GetAgent(ctx, w.RequestID)
+	switch {
+	case errors.Is(err, cursorapi.ErrNotFound):
+		return ReasonAgentDeleted
+	case cursorapi.IsAuthError(err):
+		c.disableAgentChecks(err)
+		return ""
+	case err != nil:
+		c.log.Warn("gc: get agent", "agent", w.RequestID, "err", err)
+		return ""
+	}
+	if agent.Status == cursorapi.AgentStatusArchived {
+		return ReasonAgentArchived
+	}
+	return ""
+}
+
+func (c *Controller) agentChecksDisabled() bool {
+	c.agentCheckMu.Lock()
+	defer c.agentCheckMu.Unlock()
+	return c.agentCheckDisabled
+}
+
+func (c *Controller) disableAgentChecks(err error) {
+	c.agentCheckMu.Lock()
+	defer c.agentCheckMu.Unlock()
+	if !c.agentCheckDisabled {
+		c.agentCheckDisabled = true
+		c.log.Warn("gc: api key cannot read /v1/agents; archived-agent disposal disabled, TTL disposal still active", "err", err)
+	}
+}
+
+func poolLabel(pool string) string {
+	if pool == "" {
+		return "*"
+	}
+	return pool
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}

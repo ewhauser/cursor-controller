@@ -1,0 +1,76 @@
+# Worker Pod template for the kube backend.
+#
+# The controller overwrites metadata.name/namespace, adds its own labels and
+# annotations, forces restartPolicy: Never, injects the CURSOR_* environment
+# for the claim (pool, worker id, request id, repo, wake flags), and, when a
+# PVC template is configured, mounts the retained workspace volume named
+# "workspace" at --workspace-mount-path (default /workspace).
+#
+# Your image must ship the Cursor `agent` CLI and git. With a retained
+# workspace the monorepo lives on the PVC, so the image only needs tooling.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/name: cursor-worker
+spec:
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 30
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  containers:
+    - name: worker
+      image: YOUR_REGISTRY/cursor-worker:latest
+      # $(CURSOR_POOL) and $(CURSOR_WORKSPACE_PATH) are expanded by the kubelet
+      # from the env the controller injects.
+      args:
+        - worker
+        - --pool
+        - $(CURSOR_POOL)
+        - --worker-dir
+        - $(CURSOR_WORKSPACE_PATH)
+        - --idle-release-timeout
+        - "600"
+        - --management-addr
+        - 0.0.0.0:8080
+        - start
+      env:
+        # Provided by the controller via --worker-api-key-secret; or declare
+        # it here yourself:
+        # - name: CURSOR_API_KEY
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: cursor-api-key
+        #       key: api-key
+        - name: CURSOR_WORKSPACE_PATH
+          value: /workspace
+      ports:
+        - name: management
+          containerPort: 8080
+      readinessProbe:
+        httpGet:
+          path: /readyz
+          port: management
+        initialDelaySeconds: 15
+        periodSeconds: 5
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: management
+        initialDelaySeconds: 30
+        periodSeconds: 10
+      resources:
+        requests:
+          cpu: "2"
+          memory: 4Gi
+        limits:
+          memory: 8Gi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 2Gi

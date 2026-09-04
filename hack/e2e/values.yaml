@@ -1,0 +1,54 @@
+# Helm values for the e2e install: controller talks to the in-cluster fake
+# API, workers are the fake worker, workspaces are CSI hostpath PVCs cloned
+# from the monorepo-latest snapshot, and every timer is short.
+image:
+  repository: cursor-controller
+  tag: dev
+  pullPolicy: IfNotPresent
+
+auth:
+  existingSecret: cursor-api-key
+
+pools: [e2e]
+
+controller:
+  apiUrl: http://fake-cursor-api.cursord.svc:8080
+  workerIdPrefix: e2e
+  resyncInterval: 20s
+  logLevel: debug
+  logFormat: text
+
+gc:
+  interval: 10s
+  disposeAfter: 30m
+  disposeArchivedAfter: 5s
+  disposeUnclaimedAfter: 1m
+  checkAgent: true
+
+persistence:
+  enabled: true
+  mountPath: /workspace
+  claimSpec:
+    accessModes: [ReadWriteOnce]
+    storageClassName: csi-hostpath-sc
+    resources:
+      requests:
+        storage: 1Gi
+    dataSource:
+      apiGroup: snapshot.storage.k8s.io
+      kind: VolumeSnapshot
+      name: monorepo-latest
+
+worker:
+  image:
+    repository: cursor-controller-e2e
+    tag: dev
+  command: [/fake-worker]
+  idleReleaseTimeout: 15
+  managementAddr: "0.0.0.0:8080"
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {memory: 64Mi}
+  probes:
+    readiness: {path: /readyz, initialDelaySeconds: 1, periodSeconds: 2}
+    liveness: {path: /healthz, initialDelaySeconds: 5, periodSeconds: 5}

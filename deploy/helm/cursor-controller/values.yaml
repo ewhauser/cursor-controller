@@ -1,0 +1,148 @@
+# Controller image (this repository's Dockerfile).
+image:
+  repository: ghcr.io/ewhauser/cursor-controller
+  tag: ""          # defaults to .Chart.AppVersion
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Cursor service-account API key (team, agent scope). Provide an existing
+# Secret or let the chart create one from auth.apiKey (prefer --set / a
+# gitignored overlay over committing the key).
+auth:
+  existingSecret: ""
+  secretKey: api-key
+  apiKey: ""
+
+# Pools to serve. Empty = every pool visible to the key.
+pools:
+  - default
+# Optional repository filter for repo-scoped keys.
+repository: ""
+
+controller:
+  apiUrl: https://api.cursor.com
+  # Prefix for minted worker ids; also how the controller recognises its own
+  # workers. Lowercase alphanumerics and dashes, <= 40 chars.
+  workerIdPrefix: cc
+  # Keep N idle workers connected per pool (0 = claim-then-spawn only).
+  warmIdle: 0
+  warmInterval: 1m
+  resyncInterval: 4m
+  logLevel: info
+  logFormat: json
+  # Extra CLI args appended verbatim.
+  extraArgs: []
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+# Workspace garbage collection.
+gc:
+  interval: 5m
+  # Hard TTL for any offline worker, whatever its agent status. 0 disables.
+  disposeAfter: 168h
+  # Dispose once the agent is ARCHIVED (or deleted) and the worker has been
+  # offline at least this long.
+  disposeArchivedAfter: 1h
+  # Dispose warm workers that exited without ever getting a request.
+  disposeUnclaimedAfter: 1h
+  # Query GET /v1/agents/{id}; needs a key with agent read scope.
+  checkAgent: true
+
+# Retained per-worker workspace. When enabled, every worker gets its own PVC
+# created from this spec (typically seeded from a VolumeSnapshot), the PVC is
+# re-mounted on hibernation wake, and it is deleted by gc.
+persistence:
+  enabled: false
+  mountPath: /workspace
+  claimSpec:
+    accessModes: [ReadWriteOnce]
+    storageClassName: gp3
+    resources:
+      requests:
+        storage: 100Gi
+    # dataSource:
+    #   apiGroup: snapshot.storage.k8s.io
+    #   kind: VolumeSnapshot
+    #   name: monorepo-latest
+
+# Worker Pod. Either set worker.podTemplate to a full Pod manifest, or use the
+# structured fields below and the chart assembles one.
+worker:
+  podTemplate: {}
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  command: [agent]
+  # Seconds the worker stays connected after a session ends before exiting 0.
+  idleReleaseTimeout: 600
+  # --worker-dir. Defaults to persistence.mountPath when persistence is on,
+  # else /workspace. Empty string omits the flag.
+  workerDir: ""
+  managementAddr: "0.0.0.0:8080"
+  # Extra `--label key=value` flags (Cursor routing labels, not k8s labels).
+  labels: []
+  extraArgs: []
+  env: []
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+  podLabels: {}
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 30
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  imagePullSecrets: []
+  probes:
+    enabled: true
+    readiness:
+      path: /readyz
+      initialDelaySeconds: 15
+      periodSeconds: 5
+    liveness:
+      path: /healthz
+      initialDelaySeconds: 30
+      periodSeconds: 10
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+metrics:
+  port: 8080
+  service:
+    enabled: true
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
