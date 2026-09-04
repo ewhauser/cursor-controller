@@ -1,0 +1,25 @@
+# Minimal OpenTelemetry Collector config for local checks: receives OTLP on
+# 4317 (gRPC) and 4318 (HTTP) and prints everything.
+#
+#   docker run --rm -p 4317:4317 -p 4318:4318 \
+#     -v "$PWD/hack/otel-collector.yaml:/etc/otelcol/config.yaml" \
+#     otel/opentelemetry-collector:0.120.0
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 ./hack/local-e2e.sh
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+exporters:
+  debug:
+    verbosity: detailed
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]

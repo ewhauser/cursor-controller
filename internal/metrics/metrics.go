@@ -71,6 +71,9 @@ func New() *Metrics {
 	return m
 }
 
+// Gatherer exposes the registry so it can be bridged into OpenTelemetry.
+func (m *Metrics) Gatherer() prometheus.Gatherer { return m.reg }
+
 // ObserveAPI is a cursorapi.Observer.
 func (m *Metrics) ObserveAPI(method, path string, status int, d time.Duration) {
 	m.APIRequests.WithLabelValues(method, path, strconv.Itoa(status)).Inc()

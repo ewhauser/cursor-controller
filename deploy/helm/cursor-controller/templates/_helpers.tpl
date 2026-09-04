@@ -88,6 +88,9 @@ app.kubernetes.io/component: controller
 {{- if and (gt (.Values.controller.warmIdle | int) 0) (not .Values.pools) -}}
 {{- fail "controller.warmIdle > 0 requires at least one entry in pools." -}}
 {{- end -}}
+{{- if and .Values.otel.enabled (not .Values.otel.endpoint) -}}
+{{- fail "otel.enabled requires otel.endpoint (or set OTEL_EXPORTER_OTLP_ENDPOINT via controller.extraEnv)." -}}
+{{- end -}}
 {{- if and .Values.persistence.enabled (not .Values.persistence.claimSpec) -}}
 {{- fail "persistence.claimSpec is required when persistence.enabled=true." -}}
 {{- end -}}

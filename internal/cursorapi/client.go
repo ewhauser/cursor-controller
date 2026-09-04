@@ -114,8 +114,36 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 func (c *Client) report(method, path string, status int, start time.Time) {
 	if c.observe != nil {
-		c.observe(method, path, status, time.Since(start))
+		c.observe(method, RouteTemplate(path), status, time.Since(start))
 	}
+}
+
+// RouteTemplate collapses ids in a fleet API path so it can be used as a
+// metric label or span name without unbounded cardinality:
+// /v0/private-workers/pw_1 -> /v0/private-workers/{id}.
+func RouteTemplate(path string) string {
+	parts := strings.Split(path, "/")
+	for i := 1; i < len(parts); i++ {
+		switch parts[i-1] {
+		case "private-workers":
+			if !isKnownWorkerSubpath(parts[i]) {
+				parts[i] = "{id}"
+			}
+		case "claims", "agents":
+			if parts[i] != "" {
+				parts[i] = "{id}"
+			}
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func isKnownWorkerSubpath(s string) bool {
+	switch s {
+	case "pending-requests", "pools", "claim", "claims", "summary", "stream", "":
+		return true
+	}
+	return false
 }
 
 func newAPIError(method, path string, resp *http.Response) error {

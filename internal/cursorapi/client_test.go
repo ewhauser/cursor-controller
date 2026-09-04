@@ -153,3 +153,23 @@ func TestDecodeClaimEvent(t *testing.T) {
 		t.Fatal("expected error for missing id")
 	}
 }
+
+func TestRouteTemplate(t *testing.T) {
+	cases := map[string]string{
+		"/v0/private-workers":                                "/v0/private-workers",
+		"/v0/private-workers/pw_123":                         "/v0/private-workers/{id}",
+		"/v0/private-workers/summary":                        "/v0/private-workers/summary",
+		"/v0/private-workers/pools":                          "/v0/private-workers/pools",
+		"/v0/private-workers/pending-requests":               "/v0/private-workers/pending-requests",
+		"/v0/private-workers/pending-requests/stream":        "/v0/private-workers/pending-requests/stream",
+		"/v0/private-workers/claim":                          "/v0/private-workers/claim",
+		"/v0/private-workers/claims/bc-1/release":            "/v0/private-workers/claims/{id}/release",
+		"/v1/agents/bc-00000000-0000-0000-0000-000000000001": "/v1/agents/{id}",
+		"/v1/agents": "/v1/agents",
+	}
+	for in, want := range cases {
+		if got := RouteTemplate(in); got != want {
+			t.Errorf("RouteTemplate(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

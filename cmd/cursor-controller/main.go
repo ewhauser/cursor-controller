@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -27,6 +29,7 @@ import (
 	"github.com/ewhauser/cursor-controller/internal/controller"
 	"github.com/ewhauser/cursor-controller/internal/cursorapi"
 	"github.com/ewhauser/cursor-controller/internal/metrics"
+	"github.com/ewhauser/cursor-controller/internal/telemetry"
 )
 
 var version = "dev"
@@ -117,6 +120,13 @@ func run() error {
 		logFormat        = fs.String("log-format", envOr("CONTROLLER_LOG_FORMAT", "json"), "json or text (CONTROLLER_LOG_FORMAT)")
 		showVersion      = fs.Bool("version", false, "Print version and exit")
 
+		// opentelemetry
+		otelEnabled  = fs.Bool("otel", envBool("CONTROLLER_OTEL", telemetry.Enabled()), "Export traces/metrics over OTLP; defaults to on when OTEL_EXPORTER_OTLP_ENDPOINT is set (CONTROLLER_OTEL)")
+		otelTraces   = fs.Bool("otel-traces", envBool("CONTROLLER_OTEL_TRACES", true), "Export traces when --otel is on (CONTROLLER_OTEL_TRACES)")
+		otelMetrics  = fs.Bool("otel-metrics", envBool("CONTROLLER_OTEL_METRICS", true), "Export the Prometheus metrics over OTLP when --otel is on (CONTROLLER_OTEL_METRICS)")
+		otelProtocol = fs.String("otel-protocol", envOr("CONTROLLER_OTEL_PROTOCOL", ""), "OTLP protocol: grpc or http/protobuf; empty reads OTEL_EXPORTER_OTLP_PROTOCOL, default grpc (CONTROLLER_OTEL_PROTOCOL)")
+		otelService  = fs.String("otel-service-name", envOr("OTEL_SERVICE_NAME", "cursor-controller"), "service.name resource attribute (OTEL_SERVICE_NAME)")
+
 		// kube backend
 		kubeconfig      = fs.String("kubeconfig", os.Getenv("KUBECONFIG"), "Path to kubeconfig; empty uses in-cluster config (KUBECONFIG)")
 		namespace       = fs.String("namespace", envOr("CONTROLLER_NAMESPACE", envOr("POD_NAMESPACE", "")), "Namespace for worker pods and PVCs (CONTROLLER_NAMESPACE)")
@@ -170,7 +180,24 @@ func run() error {
 	}
 
 	m := metrics.New()
-	api := cursorapi.New(*apiURL, key, cursorapi.WithObserver(m.ObserveAPI), cursorapi.WithUserAgent("cursor-controller/"+version))
+	var otelShutdown telemetry.Shutdown
+	if *otelEnabled {
+		var err error
+		otelShutdown, err = telemetry.Setup(context.Background(), telemetry.Config{
+			ServiceName: *otelService, ServiceVersion: version, Protocol: *otelProtocol,
+			Traces: *otelTraces, Metrics: *otelMetrics, Gatherer: m.Gatherer(), Log: log,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	httpClient := &http.Client{Transport: http.DefaultTransport}
+	if *otelEnabled && *otelTraces {
+		httpClient.Transport = otelhttp.NewTransport(http.DefaultTransport, otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return "cursor-api " + r.Method + " " + cursorapi.RouteTemplate(r.URL.Path)
+		}))
+	}
+	api := cursorapi.New(*apiURL, key, cursorapi.WithObserver(m.ObserveAPI), cursorapi.WithUserAgent("cursor-controller/"+version), cursorapi.WithHTTPClient(httpClient))
 
 	var be backend.Backend
 	switch *backendKind {
@@ -200,7 +227,7 @@ func run() error {
 			}
 			opts.PVCTemplate = pvc
 		}
-		client, ns, err := kubeClient(*kubeconfig)
+		client, ns, err := kubeClient(*kubeconfig, *otelEnabled && *otelTraces)
 		if err != nil {
 			return err
 		}
@@ -266,6 +293,13 @@ func run() error {
 	}
 	g.Go(func() error { return ctrl.Run(gctx) })
 	err = g.Wait()
+	if otelShutdown != nil {
+		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if serr := otelShutdown(sctx); serr != nil {
+			log.Warn("opentelemetry shutdown", "err", serr)
+		}
+		cancel()
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
@@ -290,10 +324,20 @@ func newLogger(level, format string) (*slog.Logger, error) {
 
 // kubeClient builds a clientset from kubeconfig or in-cluster config and
 // returns the default namespace it implies.
-func kubeClient(kubeconfig string) (kubernetes.Interface, string, error) {
+func kubeClient(kubeconfig string, traced bool) (kubernetes.Interface, string, error) {
+	wrap := func(cfg *rest.Config) *rest.Config {
+		if traced {
+			cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+				return otelhttp.NewTransport(rt, otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+					return "kube-api " + r.Method
+				}))
+			})
+		}
+		return cfg
+	}
 	if kubeconfig == "" {
 		if cfg, err := rest.InClusterConfig(); err == nil {
-			cs, err := kubernetes.NewForConfig(cfg)
+			cs, err := kubernetes.NewForConfig(wrap(cfg))
 			if err != nil {
 				return nil, "", err
 			}
@@ -313,7 +357,7 @@ func kubeClient(kubeconfig string) (kubernetes.Interface, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("kubernetes config: %w", err)
 	}
-	cs, err := kubernetes.NewForConfig(cfg)
+	cs, err := kubernetes.NewForConfig(wrap(cfg))
 	if err != nil {
 		return nil, "", err
 	}

@@ -130,6 +130,23 @@ worker:
       initialDelaySeconds: 30
       periodSeconds: 10
 
+# Optional OpenTelemetry export. Traces cover claim/wake/gc/dispose and every
+# outbound Cursor and Kubernetes API call; metrics are the Prometheus metrics
+# pushed over OTLP. Standard OTEL_* variables can be added via controller.extraEnv.
+otel:
+  enabled: false
+  # e.g. http://otel-collector.observability.svc:4317
+  endpoint: ""
+  # grpc or http/protobuf
+  protocol: grpc
+  traces: true
+  metrics: true
+  serviceName: cursor-controller
+  # Extra resource attributes, e.g. "deployment.environment=prod,k8s.cluster.name=eks-1"
+  resourceAttributes: ""
+  # OTEL_EXPORTER_OTLP_HEADERS, e.g. "authorization=Bearer ..." (prefer extraEnv with a Secret ref)
+  headers: ""
+
 rbac:
   create: true
 

@@ -10,10 +10,36 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/ewhauser/cursor-controller/internal/backend"
 	"github.com/ewhauser/cursor-controller/internal/cursorapi"
 	"github.com/ewhauser/cursor-controller/internal/metrics"
 )
+
+// tracer is a no-op until telemetry.Setup installs a provider.
+var tracer = otel.Tracer("github.com/ewhauser/cursor-controller/internal/controller")
+
+// Span attribute keys.
+const (
+	attrRequestID = attribute.Key("cursor.request_id")
+	attrWorkerID  = attribute.Key("cursor.worker_id")
+	attrPool      = attribute.Key("cursor.pool")
+	attrKind      = attribute.Key("cursor.spawn_kind")
+	attrResult    = attribute.Key("cursor.result")
+	attrReason    = attribute.Key("cursor.dispose_reason")
+)
+
+func spanResult(span trace.Span, result string, err error) {
+	span.SetAttributes(attrResult.String(result))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, result)
+	}
+}
 
 // Config tunes the controller loops.
 type Config struct {
@@ -322,16 +348,22 @@ func (c *Controller) claimAndSpawn(ctx context.Context, r *cursorapi.PendingRequ
 	defer c.inflight.Delete("req:" + r.ID)
 
 	workerID := backend.NewWorkerID(c.cfg.WorkerIDPrefix)
+	ctx, span := tracer.Start(ctx, "controller.claim_and_spawn",
+		trace.WithAttributes(attrRequestID.String(r.ID), attrPool.String(pool), attrWorkerID.String(workerID), attrKind.String(string(backend.KindClaim))))
+	defer span.End()
 	if _, err := c.api.ClaimRequest(ctx, r.ID, workerID); err != nil {
 		switch {
 		case errors.Is(err, cursorapi.ErrConflict):
 			c.m.Claims.WithLabelValues(pool, "conflict").Inc()
+			spanResult(span, "conflict", nil)
 			log.Debug("request already claimed")
 		case errors.Is(err, cursorapi.ErrNotFound):
 			c.m.Claims.WithLabelValues(pool, "gone").Inc()
+			spanResult(span, "gone", nil)
 			log.Debug("request no longer pending")
 		default:
 			c.m.Claims.WithLabelValues(pool, "error").Inc()
+			spanResult(span, "claim_error", err)
 			log.Error("claim failed", "err", err)
 			c.authCheck(err)
 		}
@@ -344,11 +376,13 @@ func (c *Controller) claimAndSpawn(ctx context.Context, r *cursorapi.PendingRequ
 	spec := backend.Spec{WorkerID: workerID, Pool: pool, Kind: backend.KindClaim, Request: r, APIURL: c.cfg.APIURL}
 	if err := c.backend.Spawn(ctx, spec); err != nil {
 		c.m.Spawns.WithLabelValues(pool, string(backend.KindClaim), "error").Inc()
+		spanResult(span, "spawn_error", err)
 		log.Error("spawn failed; releasing claim", "err", err)
 		c.release(ctx, r.ID, "spawn_failed")
 		return
 	}
 	c.m.Spawns.WithLabelValues(pool, string(backend.KindClaim), "ok").Inc()
+	spanResult(span, "spawned", nil)
 }
 
 func (c *Controller) wake(ctx context.Context, r *cursorapi.PendingRequest) {
@@ -365,6 +399,10 @@ func (c *Controller) wake(ctx context.Context, r *cursorapi.PendingRequest) {
 	}
 	defer c.inflight.Delete("wake:" + workerID)
 
+	ctx, span := tracer.Start(ctx, "controller.wake",
+		trace.WithAttributes(attrRequestID.String(r.ID), attrPool.String(pool), attrWorkerID.String(workerID), attrKind.String(string(backend.KindWake)),
+			attribute.Int64("cursor.wake_timeout_ms", r.WakeTimeoutMs)))
+	defer span.End()
 	log.Info("waking hibernated worker", "wake_timeout", r.WakeTimeout())
 	spec := backend.Spec{WorkerID: workerID, Pool: pool, Kind: backend.KindWake, Request: r, WakeTimeout: r.WakeTimeout(), APIURL: c.cfg.APIURL}
 	err := c.backend.Wake(ctx, spec)
@@ -372,19 +410,25 @@ func (c *Controller) wake(ctx context.Context, r *cursorapi.PendingRequest) {
 	case err == nil:
 		c.m.Wakes.WithLabelValues(pool, "woken").Inc()
 		c.m.Spawns.WithLabelValues(pool, string(backend.KindWake), "ok").Inc()
+		spanResult(span, "woken", nil)
 	case errors.Is(err, backend.ErrWorkspaceMissing), errors.Is(err, backend.ErrUnknownWorker):
 		c.m.Wakes.WithLabelValues(pool, "missing").Inc()
+		spanResult(span, "workspace_missing", nil)
 		log.Warn("cannot wake worker; releasing claim so Cursor re-queues the request", "err", err)
 		c.release(ctx, r.ID, "workspace_missing")
 	default:
 		c.m.Wakes.WithLabelValues(pool, "error").Inc()
 		c.m.Spawns.WithLabelValues(pool, string(backend.KindWake), "error").Inc()
+		spanResult(span, "wake_error", err)
 		log.Error("wake failed; will retry on next list", "err", err)
 	}
 }
 
 func (c *Controller) release(ctx context.Context, requestID, reason string) {
+	ctx, span := tracer.Start(ctx, "controller.release", trace.WithAttributes(attrRequestID.String(requestID), attrReason.String(reason)))
+	defer span.End()
 	if _, err := c.api.ReleaseClaim(ctx, requestID); err != nil && !errors.Is(err, cursorapi.ErrNotFound) {
+		spanResult(span, "release_failed", err)
 		c.m.Releases.WithLabelValues(reason + "_failed").Inc()
 		c.log.Error("release claim", "request", requestID, "reason", reason, "err", err)
 		return
@@ -408,6 +452,8 @@ func (c *Controller) warmLoop(ctx context.Context, pool string) {
 // reconcileWarm spawns enough workers to reach WarmIdle idle workers, counting
 // pods that are still starting so back-to-back ticks do not over-spawn.
 func (c *Controller) reconcileWarm(ctx context.Context, pool string, log *slog.Logger) {
+	ctx, span := tracer.Start(ctx, "controller.warm_reconcile", trace.WithAttributes(attrPool.String(pool)))
+	defer span.End()
 	p, err := c.api.GetPool(ctx, pool)
 	if err != nil {
 		if errors.Is(err, cursorapi.ErrNotFound) {
@@ -430,6 +476,7 @@ func (c *Controller) reconcileWarm(ctx context.Context, pool string, log *slog.L
 	}
 	deficit := c.cfg.WarmIdle - p.IdleWorkerCount() - starting
 	c.m.WarmDeficit.WithLabelValues(pool).Set(float64(deficit))
+	span.SetAttributes(attribute.Int("cursor.warm_deficit", deficit), attribute.Int("cursor.idle_workers", p.IdleWorkerCount()))
 	if deficit <= 0 {
 		return
 	}
@@ -470,9 +517,12 @@ const (
 
 // RunGC performs one disposal pass.
 func (c *Controller) RunGC(ctx context.Context) error {
+	ctx, span := tracer.Start(ctx, "controller.gc")
+	defer span.End()
 	c.m.GCRuns.Inc()
 	workers, err := c.backend.ListWorkers(ctx)
 	if err != nil {
+		spanResult(span, "list_error", err)
 		return err
 	}
 	var live, idle, unknown int
@@ -495,18 +545,28 @@ func (c *Controller) RunGC(ctx context.Context) error {
 			continue
 		}
 		log := c.log.With("worker", w.ID, "request", w.RequestID, "pool", w.Pool, "reason", reason, "idle", c.now().Sub(w.LastActivity).Round(time.Second))
-		if err := c.backend.Dispose(ctx, w.ID, reason); err != nil {
-			c.m.Disposals.WithLabelValues(reason, "error").Inc()
-			log.Error("dispose failed", "err", err)
-			continue
-		}
-		c.m.Disposals.WithLabelValues(reason, "ok").Inc()
-		log.Info("disposed worker")
+		c.dispose(ctx, w, reason, log)
 	}
+	span.SetAttributes(attribute.Int("cursor.workers_live", live), attribute.Int("cursor.workers_idle", idle), attribute.Int("cursor.workers_unknown", unknown))
 	c.m.Workers.WithLabelValues("live").Set(float64(live))
 	c.m.Workers.WithLabelValues("idle").Set(float64(idle))
 	c.m.Workers.WithLabelValues("unknown").Set(float64(unknown))
 	return nil
+}
+
+func (c *Controller) dispose(ctx context.Context, w backend.WorkerInfo, reason string, log *slog.Logger) {
+	ctx, span := tracer.Start(ctx, "controller.dispose",
+		trace.WithAttributes(attrWorkerID.String(w.ID), attrRequestID.String(w.RequestID), attrPool.String(w.Pool), attrReason.String(reason)))
+	defer span.End()
+	if err := c.backend.Dispose(ctx, w.ID, reason); err != nil {
+		c.m.Disposals.WithLabelValues(reason, "error").Inc()
+		spanResult(span, "dispose_error", err)
+		log.Error("dispose failed", "err", err)
+		return
+	}
+	c.m.Disposals.WithLabelValues(reason, "ok").Inc()
+	spanResult(span, "disposed", nil)
+	log.Info("disposed worker")
 }
 
 // liveness uses the backend's view when it has one, else asks Cursor whether
