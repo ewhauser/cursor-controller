@@ -3,6 +3,7 @@ package projectcheck
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ func TestPublishedImageWaitsForEveryValidationJob(t *testing.T) {
 	if err := yaml.Unmarshal(readRepositoryFile(t, ".github/workflows/ci.yaml"), &workflow); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"test": false, "helm": false, "local-e2e": false, "kind-e2e": false}
+	want := map[string]bool{"build": false, "test": false, "lint": false, "helm": false, "local-e2e": false, "kind-e2e": false}
 	for _, dependency := range workflow.Jobs["image"].Needs {
 		if _, ok := want[dependency]; ok {
 			want[dependency] = true
@@ -50,10 +51,83 @@ func TestPublishedImageWaitsForEveryValidationJob(t *testing.T) {
 	}
 }
 
-func TestMakeLintActuallyRunsLintChecks(t *testing.T) {
+func TestMakeTargetsMatchCIEntryPoints(t *testing.T) {
 	makefile := string(readRepositoryFile(t, "Makefile"))
-	if !strings.Contains(makefile, "lint: vet") || !strings.Contains(makefile, "gofmt -l") {
-		t.Fatalf("lint target must run vet and reject unformatted Go files")
+	for _, required := range []string{
+		"GO_PACKAGES := ./...",
+		"GOLANGCI_LINT_VERSION ?= v2.11.3",
+		"github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)",
+		"$(GOLANGCI_LINT) run ./...",
+		"$(GOLANGCI_LINT) run --new-from-rev=HEAD ./...",
+		"go build $(GO_PACKAGES)",
+		"go test $(RACE) $(GO_PACKAGES)",
+		"check: build test lint helm-lint",
+	} {
+		if !strings.Contains(makefile, required) {
+			t.Errorf("Makefile missing gbash-style entry point %q", required)
+		}
+	}
+}
+
+func TestGolangCILintAndPreCommitArePinned(t *testing.T) {
+	lintConfig := string(readRepositoryFile(t, ".golangci.yml"))
+	for _, required := range []string{`version: "2"`, "goimports", "staticcheck", "modernize", "errorlint", "contextcheck"} {
+		if !strings.Contains(lintConfig, required) {
+			t.Errorf(".golangci.yml missing %q", required)
+		}
+	}
+	preCommit := string(readRepositoryFile(t, ".pre-commit-config.yaml"))
+	if !strings.Contains(preCommit, "entry: make lint-new") || !strings.Contains(preCommit, "pass_filenames: false") {
+		t.Error("pre-commit hook must run the pinned changed-code lint target")
+	}
+	renovate := string(readRepositoryFile(t, ".renovaterc.json5"))
+	if !strings.Contains(renovate, "helpers:pinGitHubActionDigests") || !strings.Contains(renovate, `"minimumReleaseAge": "3 days"`) {
+		t.Error("Renovate must maintain immutable action pins with a release cooldown")
+	}
+}
+
+func TestCIUsesCanonicalMakeTargetsAndLeastPrivilege(t *testing.T) {
+	workflowBytes := readRepositoryFile(t, ".github/workflows/ci.yaml")
+	workflow := string(workflowBytes)
+	for _, command := range []string{"run: make build", "run: make test", "run: make lint", "run: make helm-lint", "run: make local-e2e"} {
+		if !strings.Contains(workflow, command) {
+			t.Errorf("CI does not use canonical target %q", command)
+		}
+	}
+	var permissions struct {
+		Permissions map[string]string `yaml:"permissions"`
+		Jobs        map[string]struct {
+			Permissions map[string]string `yaml:"permissions"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(workflowBytes, &permissions); err != nil {
+		t.Fatal(err)
+	}
+	if permissions.Permissions["contents"] != "read" || permissions.Permissions["packages"] != "" {
+		t.Errorf("workflow permissions are not read-only: %+v", permissions.Permissions)
+	}
+	if permissions.Jobs["image"].Permissions["packages"] != "write" {
+		t.Errorf("image job lacks scoped package write permission: %+v", permissions.Jobs["image"].Permissions)
+	}
+}
+
+func TestGitHubActionsUseImmutablePins(t *testing.T) {
+	workflows, err := filepath.Glob(filepath.Join(repositoryRoot(t), ".github", "workflows", "*.y*ml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := regexp.MustCompile(`@[0-9a-f]{40}(?:\s+#\s+v\S+)?$`)
+	for _, workflow := range workflows {
+		body, err := os.ReadFile(workflow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for lineNumber, line := range strings.Split(string(body), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.Contains(line, "uses:") && !pinned.MatchString(line) {
+				t.Errorf("%s:%d action is not pinned to a full commit SHA with a version comment: %s", filepath.Base(workflow), lineNumber+1, line)
+			}
+		}
 	}
 }
 

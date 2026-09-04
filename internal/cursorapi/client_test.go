@@ -178,7 +178,7 @@ func TestListAllWorkersPaginates(t *testing.T) {
 
 func TestOrdinaryRequestsHaveDeadline(t *testing.T) {
 	started := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		close(started)
 		<-r.Context().Done()
 	}))
@@ -193,7 +193,7 @@ func TestOrdinaryRequestsHaveDeadline(t *testing.T) {
 }
 
 func TestRequestTimeoutDoesNotCutOffSSEStream(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()

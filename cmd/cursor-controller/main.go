@@ -38,7 +38,7 @@ type multiFlag []string
 
 func (m *multiFlag) String() string { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error {
-	for _, p := range strings.Split(v, ",") {
+	for p := range strings.SplitSeq(v, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			*m = append(*m, p)
 		}
@@ -90,7 +90,7 @@ func main() {
 func run() error {
 	fs := flag.NewFlagSet("cursor-controller", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "cursor-controller %s\n\nEvery flag can also be set with the environment variable named next to it.\n\n", version)
+		_, _ = fmt.Fprintf(fs.Output(), "cursor-controller %s\n\nEvery flag can also be set with the environment variable named next to it.\n\n", version)
 		fs.PrintDefaults()
 	}
 

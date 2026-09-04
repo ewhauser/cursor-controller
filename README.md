@@ -236,7 +236,7 @@ Three layers, cheapest first:
 | Layer | Command | Needs | What it proves |
 | --- | --- | --- | --- |
 | Unit | `make test` | go | Parsers, claim/wake/GC logic, Pod/PVC construction (fake clientset), hook env contract, plus a component test that runs the real HTTP client and controller against the in-memory fake API. |
-| Laptop e2e | `./hack/local-e2e.sh` | go, curl | Real processes: fake fleet API, controller (hook backend), fake worker. Claim, idle exit, follow-up wake with the workspace intact, missing workspace → release → re-claim, archive → dispose hook. About 40 seconds. |
+| Laptop e2e | `make local-e2e` | go, curl | Real processes: fake fleet API, controller (hook backend), fake worker. Claim, idle exit, follow-up wake with the workspace intact, missing workspace → release → re-claim, archive → dispose hook. About 40 seconds. |
 | kind e2e | `make e2e-setup && make e2e` | docker with buildx, kind, kubectl, helm | Real cluster with the CSI hostpath driver and snapshot controller: PVC cloned from a `VolumeSnapshot`, Pod lifecycle, wake on the same PVC with the marker file present, PVC deletion on archive, controller restart without duplicate claims. `make e2e-teardown` removes the cluster. |
 
 On macOS without Docker Desktop: `brew install colima docker docker-buildx kind helm`,
@@ -307,12 +307,21 @@ watch spans and metrics arrive.
 ## Development
 
 ```bash
-make test            # go test -race ./...
-make build           # bin/cursor-controller
-make image           # docker build
-make helm-template   # render the chart
-./hack/local-e2e.sh  # laptop end-to-end with the fakes
+make check          # build, race tests, lint, and Helm lint
+make build          # compile every package and bin/cursor-controller
+make test           # go test -race ./...
+make lint           # pinned golangci-lint suite
+make lint-new       # lint changes relative to HEAD (pre-commit hook)
+make helm-lint      # lint normal and persistence-enabled chart values
+make local-e2e      # laptop end-to-end with the fakes
+make image          # local container image
 ```
+
+The Make targets are the canonical entry points used by CI. The lint target
+runs the repository-pinned golangci-lint version through `go run`, so a global
+installation is not required. To run changed-code linting before each commit,
+install [pre-commit](https://pre-commit.com/) and run `pre-commit install`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow.
 
 Layout:
 

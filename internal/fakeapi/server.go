@@ -227,9 +227,9 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
@@ -295,7 +295,7 @@ func (s *Server) listPending(w http.ResponseWriter, r *http.Request) {
 	cursor := "c" + strconv.FormatInt(s.seq, 10)
 	s.cursors[cursor] = s.o.Now()
 	page.StreamCursor = cursor
-	writeJSON(w, http.StatusOK, page)
+	writeJSON(w, page)
 }
 
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
@@ -396,7 +396,7 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 	// the warm worker through GET /private-workers activeBcId.
 	s.emitLocked(cursorapi.EventClaimed, map[string]string{"id": req.ID})
 	s.o.Log.Info("fakeapi: claimed", "request", req.ID, "worker", body.WorkerID)
-	writeJSON(w, http.StatusOK, cursorapi.Claim{ID: req.ID, WorkerID: body.WorkerID})
+	writeJSON(w, cursorapi.Claim{ID: req.ID, WorkerID: body.WorkerID})
 }
 
 func (s *Server) release(w http.ResponseWriter, r *http.Request) {
@@ -415,7 +415,7 @@ func (s *Server) release(w http.ResponseWriter, r *http.Request) {
 	s.releases = append(s.releases, id)
 	s.emitLocked(cursorapi.EventCreated, req.pendingView(0))
 	s.o.Log.Info("fakeapi: released", "request", id, "worker", worker)
-	writeJSON(w, http.StatusOK, cursorapi.Claim{ID: id, WorkerID: worker})
+	writeJSON(w, cursorapi.Claim{ID: id, WorkerID: worker})
 }
 
 func (s *Server) listPools(w http.ResponseWriter, _ *http.Request) {
@@ -443,7 +443,7 @@ func (s *Server) listPools(w http.ResponseWriter, _ *http.Request) {
 	if out == nil {
 		out = []view{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pools": out})
+	writeJSON(w, map[string]any{"pools": out})
 }
 
 func (s *Server) registerPool(w http.ResponseWriter, r *http.Request) {
@@ -458,7 +458,7 @@ func (s *Server) registerPool(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.pools[p.PoolName] = &p
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]bool{"registered": true})
+	writeJSON(w, map[string]bool{"registered": true})
 }
 
 func (s *Server) workerView(wk *Worker) cursorapi.Worker {
@@ -481,7 +481,7 @@ func (s *Server) listWorkers(w http.ResponseWriter, r *http.Request) {
 		page.Workers = append(page.Workers, s.workerView(wk))
 	}
 	page.TotalCount = len(page.Workers)
-	writeJSON(w, http.StatusOK, page)
+	writeJSON(w, page)
 }
 
 func (s *Server) workerSummary(w http.ResponseWriter, _ *http.Request) {
@@ -496,7 +496,7 @@ func (s *Server) workerSummary(w http.ResponseWriter, _ *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"team": map[string]int{"totalConnected": connected, "inUse": inUse}})
+	writeJSON(w, map[string]any{"team": map[string]int{"totalConnected": connected, "inUse": inUse}})
 }
 
 func (s *Server) getWorker(w http.ResponseWriter, r *http.Request) {
@@ -507,7 +507,7 @@ func (s *Server) getWorker(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "worker not connected", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.workerView(wk))
+	writeJSON(w, s.workerView(wk))
 }
 
 // --- /v1/agents ---------------------------------------------------------------
@@ -520,7 +520,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, a)
+	writeJSON(w, a)
 }
 
 // createAgent serves both POST /v1/agents (Cursor shape) and POST /fake/requests.
@@ -579,7 +579,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	s.agents[id] = &Agent{ID: id, Name: name, Status: cursorapi.AgentStatusActive, CreatedAt: now, UpdatedAt: now}
 	s.emitLocked(cursorapi.EventCreated, req.pendingView(0))
 	s.o.Log.Info("fakeapi: request created", "request", id, "pool", pool)
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "name": name, "status": cursorapi.AgentStatusActive, "request": req})
+	writeJSON(w, map[string]any{"id": id, "name": name, "status": cursorapi.AgentStatusActive, "request": req})
 }
 
 func (s *Server) archiveAgent(w http.ResponseWriter, r *http.Request) {
@@ -592,7 +592,7 @@ func (s *Server) archiveAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	a.Status = cursorapi.AgentStatusArchived
 	a.UpdatedAt = s.o.Now()
-	writeJSON(w, http.StatusOK, map[string]string{"id": a.ID})
+	writeJSON(w, map[string]string{"id": a.ID})
 }
 
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
@@ -607,7 +607,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	if req, ok := s.requests[id]; ok {
 		req.Status = "expired"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"id": id})
+	writeJSON(w, map[string]string{"id": id})
 }
 
 // followup models a new turn on an existing agent. If the claimed worker is
@@ -646,7 +646,7 @@ func (s *Server) followup(w http.ResponseWriter, r *http.Request) {
 		req.AwaitingWake = false
 		s.emitLocked(cursorapi.EventCreated, req.pendingView(0))
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": a.Status})
+	writeJSON(w, map[string]string{"id": id, "status": a.Status})
 }
 
 // --- /fake admin ---------------------------------------------------------------
@@ -662,7 +662,7 @@ func (s *Server) expireRequest(w http.ResponseWriter, r *http.Request) {
 	req.Status = "expired"
 	req.AwaitingWake = false
 	s.emitLocked(cursorapi.EventExpired, map[string]string{"id": req.ID})
-	writeJSON(w, http.StatusOK, req)
+	writeJSON(w, req)
 }
 
 func (s *Server) connectWorker(w http.ResponseWriter, r *http.Request) {
@@ -706,7 +706,7 @@ func (s *Server) connectWorker(w http.ResponseWriter, r *http.Request) {
 	}
 	s.connects = append(s.connects, ConnectRecord{WorkerID: id, Pool: wk.Pool, Wake: body.Wake, MarkerFound: body.MarkerFound, RequestID: body.RequestID, At: wk.ConnectedAt})
 	s.o.Log.Info("fakeapi: worker connected", "worker", id, "wake", body.Wake, "marker", body.MarkerFound, "active", wk.ActiveBcID)
-	writeJSON(w, http.StatusOK, wk)
+	writeJSON(w, wk)
 }
 
 func (s *Server) disconnectWorker(w http.ResponseWriter, r *http.Request) {
@@ -725,11 +725,11 @@ func (s *Server) disconnectWorker(w http.ResponseWriter, r *http.Request) {
 	}
 	wk.ActiveBcID = ""
 	s.o.Log.Info("fakeapi: worker disconnected", "worker", id)
-	writeJSON(w, http.StatusOK, wk)
+	writeJSON(w, wk)
 }
 
 func (s *Server) state(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.Snapshot())
+	writeJSON(w, s.Snapshot())
 }
 
 // Snapshot returns a copy of the fake's state for assertions.

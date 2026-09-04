@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sort"
 	"time"
 
@@ -584,12 +585,8 @@ func earliest(cur, t time.Time) time.Time {
 
 func mergeMaps(base, override map[string]string) map[string]string {
 	out := make(map[string]string, len(base)+len(override))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range override {
-		out[k] = v
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, override)
 	return out
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -47,7 +48,7 @@ type Config struct {
 	Pools []string
 	// Repository filter for repo-scoped service accounts (optional).
 	Repository string
-	// WorkerIDPrefix is used to mint ids and recognise our own workers.
+	// WorkerIDPrefix is used to mint ids and recognize our own workers.
 	WorkerIDPrefix string
 	// WarmIdle keeps this many idle workers connected per pool (0 = claim mode only).
 	WarmIdle int
@@ -155,7 +156,7 @@ func New(cfg Config, api API, be backend.Backend, log *slog.Logger, m *metrics.M
 	return &Controller{cfg: cfg, api: api, backend: be, log: log, m: m, now: time.Now, fatal: make(chan error, 1)}
 }
 
-// Run blocks until ctx is cancelled or a fatal error occurs.
+// Run blocks until ctx is canceled or a fatal error occurs.
 func (c *Controller) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -164,17 +165,14 @@ func (c *Controller) Run(ctx context.Context) error {
 	if len(c.cfg.Pools) == 1 {
 		watchPool = c.cfg.Pools[0]
 	}
-	wg.Add(1)
-	go func() { defer wg.Done(); c.watchLoop(ctx, watchPool) }()
+	wg.Go(func() { c.watchLoop(ctx, watchPool) })
 	for _, pool := range c.cfg.Pools {
 		if c.cfg.WarmIdle > 0 && pool != "" {
-			wg.Add(1)
-			go func(pool string) { defer wg.Done(); c.warmLoop(ctx, pool) }(pool)
+			wg.Go(func() { c.warmLoop(ctx, pool) })
 		}
 	}
 	if c.cfg.GCInterval > 0 {
-		wg.Add(1)
-		go func() { defer wg.Done(); c.gcLoop(ctx) }()
+		wg.Go(func() { c.gcLoop(ctx) })
 	}
 	var err error
 	select {
@@ -198,7 +196,7 @@ func (c *Controller) authCheck(err error) {
 	}
 	c.log.Error("cursor api rejected the api key; pool workers need a team service-account key with agent scope", "err", err)
 	if c.cfg.ExitOnAuthError {
-		c.abort(fmt.Errorf("%w: %v", ErrAuth, err))
+		c.abort(fmt.Errorf("%w: %w", ErrAuth, err))
 	}
 }
 
@@ -329,11 +327,9 @@ func (c *Controller) handleEvent(ctx context.Context, pool string, ev cursorapi.
 		}
 		// Handle off the stream goroutine so a slow spawn (image pull, hook
 		// script) never stalls event delivery. The in-flight guard dedupes.
-		c.handlers.Add(1)
-		go func() {
-			defer c.handlers.Done()
+		c.handlers.Go(func() {
 			runHandler(ctx, func(hctx context.Context) { c.handleRequest(hctx, r) })
-		}()
+		})
 	case cursorapi.EventClaimed:
 		e, err := cursorapi.DecodeClaimEvent(ev.Data)
 		if err != nil {
@@ -343,9 +339,7 @@ func (c *Controller) handleEvent(ctx context.Context, pool string, ev cursorapi.
 		if _, claimedHere := c.recentClaims.Load(e.ID); claimedHere {
 			return
 		}
-		c.handlers.Add(1)
-		go func() {
-			defer c.handlers.Done()
+		c.handlers.Go(func() {
 			runHandler(ctx, func(hctx context.Context) {
 				if e.WorkerID != "" {
 					c.recordClaim(hctx, e.WorkerID, e.ID, log)
@@ -353,7 +347,7 @@ func (c *Controller) handleEvent(ctx context.Context, pool string, ev cursorapi.
 				}
 				c.resolveClaim(hctx, e.ID, log)
 			})
-		}()
+		})
 	case cursorapi.EventExpired:
 		log.Info("request expired", "data", truncate(ev.Data, 200))
 	case cursorapi.EventHeartbeat, "":
@@ -363,12 +357,7 @@ func (c *Controller) handleEvent(ctx context.Context, pool string, ev cursorapi.
 }
 
 func (c *Controller) servesPool(pool string) bool {
-	for _, configured := range c.cfg.Pools {
-		if configured == pool {
-			return true
-		}
-	}
-	return len(c.cfg.Pools) == 0
+	return len(c.cfg.Pools) == 0 || slices.Contains(c.cfg.Pools, pool)
 }
 
 func (c *Controller) recordClaim(ctx context.Context, workerID, requestID string, log *slog.Logger) bool {

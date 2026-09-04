@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http/httptest"
 	"testing"
@@ -131,7 +132,7 @@ func TestComponentAgainstFakeAPI(t *testing.T) {
 	}
 
 	cancel()
-	if err := <-done; err != nil && err != context.Canceled {
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("run: %v", err)
 	}
 }

@@ -109,7 +109,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		c.report(method, path, 0, start)
 		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	c.report(method, path, resp.StatusCode, start)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return newAPIError(method, path, resp)
@@ -209,7 +209,7 @@ func (c *Client) ListAllPendingRequests(ctx context.Context, opts ListOptions) (
 		all    []PendingRequest
 		cursor string
 	)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		page, err := c.ListPendingRequests(ctx, opts)
 		if err != nil {
 			return nil, "", err
@@ -234,7 +234,7 @@ type StreamOptions struct {
 }
 
 // StreamPendingRequests opens the SSE stream and calls fn for each event until
-// the context is cancelled, the server closes the stream, or fn errors.
+// the context is canceled, the server closes the stream, or fn errors.
 // Returns ErrCursorExpired (wrapped) on 410 so the caller can re-list.
 func (c *Client) StreamPendingRequests(ctx context.Context, opts StreamOptions, fn func(Event) error) error {
 	q := url.Values{}
@@ -258,7 +258,7 @@ func (c *Client) StreamPendingRequests(ctx context.Context, opts StreamOptions, 
 		c.report(http.MethodGet, path, 0, start)
 		return fmt.Errorf("GET %s: %w", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	c.report(http.MethodGet, path, resp.StatusCode, start)
 	if resp.StatusCode != http.StatusOK {
 		return newAPIError(http.MethodGet, path, resp)
@@ -370,7 +370,7 @@ func (c *Client) ListAllWorkers(ctx context.Context, opts WorkerListOptions) ([]
 		opts.Limit = 100
 	}
 	var workers []Worker
-	for pageNumber := 0; pageNumber < 100; pageNumber++ {
+	for range 100 {
 		page, err := c.ListWorkers(ctx, opts)
 		if err != nil {
 			return nil, err

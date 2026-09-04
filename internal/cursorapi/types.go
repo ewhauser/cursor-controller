@@ -135,8 +135,8 @@ type Agent struct {
 	Name      string    `json:"name,omitempty"`
 	Status    string    `json:"status"`
 	URL       string    `json:"url,omitempty"`
-	CreatedAt time.Time `json:"createdAt,omitempty"`
-	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+	CreatedAt time.Time `json:"createdAt,omitzero"`
+	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 }
 
 // Event types on the pending-requests SSE stream.

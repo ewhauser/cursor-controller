@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -116,12 +117,12 @@ func run(log *slog.Logger) error {
 		})
 		srv := &http.Server{Addr: mgmt, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = srv.ListenAndServe() }()
-		defer srv.Close()
+		defer func() { _ = srv.Close() }()
 	}
 
 	// Retry connect for a while: the fake API may still be coming up.
 	var err error
-	for attempt := 0; attempt < 30; attempt++ {
+	for range 30 {
 		err = admin.Connect(ctx, workerID, fakeapi.ConnectOptions{Pool: pool, Name: os.Getenv("CURSOR_WORKER_NAME"), Wake: wake, MarkerFound: found, RequestID: requestID})
 		if err == nil {
 			break
@@ -182,10 +183,5 @@ func firstNonEmpty(vals ...string) string {
 }
 
 func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }

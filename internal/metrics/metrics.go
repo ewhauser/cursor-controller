@@ -109,7 +109,7 @@ func (m *Metrics) Serve(ctx context.Context, addr string) error {
 	go func() { errCh <- srv.ListenAndServe() }()
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 		return nil
