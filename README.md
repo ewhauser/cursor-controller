@@ -1,15 +1,40 @@
 # cursor-controller
 
-A Kubernetes controller for Cursor self-hosted worker pools.
+A Kubernetes controller for Cursor self-hosted workers with pre-populated workspace volumes.
 
-cursor-controller provisions workers for pending agent requests, retains their
-workspace volumes between sessions, and resumes workers when new requests arrive.
-Configurable retention policies remove inactive workspaces.
+cursor-controller gives each worker a PersistentVolumeClaim (PVC) initialized
+from a prepared volume snapshot. The volume can already contain cloned source
+code, so workers begin with a populated workspace instead of cloning the entire
+repository at startup.
+
+## Why this controller?
+
+Cursor's built-in [`agent worker controller`](https://cursor.com/docs/cloud-agent/self-hosted/pool#worker-controller)
+handles request claiming and warm worker capacity through a user-provided
+`--spawn` script. That script can create Kubernetes Pods, containers, or processes.
+
+This project exists to make pre-populated PVCs part of that provisioning process.
+For a large repository, repeatedly cloning source code adds work before an agent
+can begin. Prepare the source tree once, snapshot its volume, and configure the
+controller to create each worker's PVC from that snapshot. Each worker receives
+its own writable workspace containing the prepared source tree.
+
+The Kubernetes backend manages Pod creation and snapshot-based PVC initialization
+through Helm values and Pod/PVC templates. Your snapshot pipeline prepares and
+refreshes the source data; the controller provisions worker volumes from it.
+Workers may still need to fetch changes or check out the requested revision.
+
+Workspace retention and cleanup complete the lifecycle: follow-up requests reuse
+the same volume, and retention policies remove workspaces when they are no longer
+needed. See [persistent workspaces](docs/workspaces.md) for setup.
+
+Workers still run Cursor's `agent` CLI, and Cursor continues to provide agent
+orchestration and model access. This project manages the worker infrastructure.
 
 ## Features
 
-- Worker provisioning through the Kubernetes API.
-- Persistent workspaces with optional initialization from volume snapshots.
+- Pre-populated workspace PVCs initialized from a prepared source-code snapshot.
+- Worker and volume provisioning through the Kubernetes API.
 - Worker resume and recovery when a workspace is unavailable.
 - Configurable warm worker capacity and workspace retention.
 - Helm deployment, Prometheus metrics, and optional OpenTelemetry export.

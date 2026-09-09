@@ -2,6 +2,15 @@
 
 [README](../README.md)
 
+Pre-populated workspace volumes are the primary use case for this controller.
+Prepare a volume containing cloned source code and create a snapshot of it. The
+controller uses that snapshot to initialize a separate writable PVC for each
+worker, avoiding a full repository clone on every worker startup.
+
+The snapshot contains the source tree as it existed when prepared. Refresh it
+through your own pipeline; workers may still need to fetch updates or check out
+the revision required by a request.
+
 Persistence creates one PVC per worker and reuses it when that worker resumes.
 Workspace cleanup deletes the PVC according to the configured retention policy.
 Review [operations](operations.md) before enabling cleanup for valuable data.
