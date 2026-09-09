@@ -35,6 +35,9 @@ pre-commit install
 
 ## Changes and tests
 
+See the [testing guide](docs/testing.md) for test prerequisites, local and
+Kubernetes scenarios, and validation against a real Cursor pool.
+
 Add a failing regression test before fixing a bug. Keep changes focused, update
 documentation when behavior or configuration changes, and run `make check`
 before opening a pull request. Changes to the controller lifecycle or backend
