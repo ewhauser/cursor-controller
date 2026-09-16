@@ -172,6 +172,12 @@ spec:
           containerPort: {{ include "cursor-controller.managementPort" . | int }}
           protocol: TCP
       {{- if .Values.worker.probes.enabled }}
+      startupProbe:
+        httpGet:
+          path: {{ .Values.worker.probes.startup.path | quote }}
+          port: management
+        periodSeconds: {{ .Values.worker.probes.startup.periodSeconds }}
+        failureThreshold: {{ .Values.worker.probes.startup.failureThreshold }}
       readinessProbe:
         httpGet:
           path: {{ .Values.worker.probes.readiness.path | quote }}

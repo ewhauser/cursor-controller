@@ -49,6 +49,12 @@ spec:
       ports:
         - name: management
           containerPort: 8080
+      startupProbe:
+        httpGet:
+          path: /healthz
+          port: management
+        periodSeconds: 5
+        failureThreshold: 120
       readinessProbe:
         httpGet:
           path: /readyz

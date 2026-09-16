@@ -34,6 +34,7 @@ const (
 	LabelWorkerID = "cursor-controller.dev/worker-id"
 	LabelPool     = "cursor-controller.dev/pool"
 
+	AnnStarted       = "cursor-controller.dev/started"
 	AnnRequestID     = "cursor-controller.dev/request-id"
 	AnnLastClaimedAt = "cursor-controller.dev/last-claimed-at"
 	AnnSpawnKind     = "cursor-controller.dev/spawn-kind"
@@ -65,8 +66,7 @@ type Options struct {
 	APIKeySecretName string
 	APIKeySecretKey  string
 	APIURL           string
-	// StartupTimeout is how long a non-ready pod may remain Pending, Running,
-	// or Unknown before the controller treats the worker as failed startup.
+	// StartupTimeout bounds pods that have never demonstrated application startup.
 	StartupTimeout time.Duration
 	Log            *slog.Logger
 	Now            func() time.Time
@@ -269,6 +269,12 @@ func (b *Backend) ListWorkers(ctx context.Context) ([]backend.WorkerInfo, error)
 	}
 	for i := range pods.Items {
 		p := &pods.Items[i]
+		if isLive(p) && b.hasStarted(p) && p.Annotations[AnnStarted] != "true" {
+			patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"uid": p.UID, "annotations": map[string]string{AnnStarted: "true"}}})
+			if _, err := b.o.Client.CoreV1().Pods(b.o.Namespace).Patch(ctx, p.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+				return nil, fmt.Errorf("record pod startup: %w", err)
+			}
+		}
 		w := get(p.Labels[LabelWorkerID])
 		if w.Pool == "" {
 			w.Pool = p.Labels[LabelPool]
@@ -413,6 +419,7 @@ func (b *Backend) BuildPod(spec backend.Spec) *corev1.Pod {
 		Labels:      mergeMaps(b.o.PodTemplate.Labels, b.labels(spec, ComponentWorker)),
 		Annotations: mergeMaps(b.o.PodTemplate.Annotations, b.annotations(spec)),
 	}
+	delete(pod.Annotations, AnnStarted)
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
 
 	c := b.workerContainer(pod)
@@ -522,21 +529,38 @@ func (b *Backend) podState(p *corev1.Pod) (live, startupTimedOut bool) {
 	if !isLive(p) {
 		return false, false
 	}
-	for _, condition := range p.Status.Conditions {
-		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-			return true, false
-		}
+	if b.hasStarted(p) {
+		return true, false
 	}
 	started := p.CreationTimestamp.Time
-	for _, condition := range p.Status.Conditions {
-		if condition.Status != corev1.ConditionTrue {
-			started = latest(started, condition.LastTransitionTime.Time)
-		}
-	}
 	if started.IsZero() || b.o.StartupTimeout <= 0 || b.o.Now().Sub(started) < b.o.StartupTimeout {
 		return true, false
 	}
 	return false, true
+}
+
+// hasStarted uses a durable annotation or the worker's successful startup probe.
+// Started alone is not evidence without a startup probe: Kubernetes sets it
+// immediately for containers with no probe. Readiness may be false while busy.
+func (b *Backend) hasStarted(p *corev1.Pod) bool {
+	if p.Annotations[AnnStarted] == "true" {
+		return true
+	}
+	for _, condition := range p.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	if len(p.Spec.Containers) == 0 {
+		return false
+	}
+	worker := b.workerContainer(p)
+	for _, status := range p.Status.ContainerStatuses {
+		if status.Name == worker.Name && (status.Ready || (worker.StartupProbe != nil && status.Started != nil && *status.Started)) {
+			return true
+		}
+	}
+	return false
 }
 
 func podFinishedAt(p *corev1.Pod) time.Time {

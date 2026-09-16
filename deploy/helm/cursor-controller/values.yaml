@@ -127,6 +127,11 @@ worker:
   imagePullSecrets: []
   probes:
     enabled: true
+    # Startup health is independent of idle/busy readiness.
+    startup:
+      path: /healthz
+      periodSeconds: 5
+      failureThreshold: 120
     readiness:
       path: /readyz
       initialDelaySeconds: 15
