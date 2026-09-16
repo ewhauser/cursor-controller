@@ -120,3 +120,43 @@ jobs:
           build-args: VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  release:
+    needs: [image]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+      - name: Package and publish chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          REGISTRY_OWNER: ${{ github.repository_owner }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          owner="${REGISTRY_OWNER,,}"
+          helm package deploy/helm/cursor-controller --version "$version" --app-version "$version" --destination dist
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          helm push "dist/cursor-controller-$version.tgz" "oci://ghcr.io/$owner/charts"
+          helm pull "oci://ghcr.io/$owner/charts/cursor-controller" --version "$version" --destination /tmp
+          cmp "dist/cursor-controller-$version.tgz" "/tmp/cursor-controller-$version.tgz"
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "dist/cursor-controller-$version.tgz" --clobber
+          else
+            flags=()
+            if [[ "$version" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$RELEASE_TAG" "dist/cursor-controller-$version.tgz" --verify-tag --generate-notes --title "$RELEASE_TAG" "${flags[@]}"
+          fi

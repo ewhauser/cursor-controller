@@ -65,6 +65,9 @@ spec:
             - --worker-api-key-secret={{ include "cursor-controller.secretName" . }}
             - --worker-api-key-secret-key={{ .Values.auth.secretKey }}
             - --worker-id-prefix={{ .Values.controller.workerIdPrefix }}
+            {{- with .Values.controller.workerApiEndpoint }}
+            - {{ printf "--worker-api-endpoint=%s" . | quote }}
+            {{- end }}
             - --api-timeout={{ .Values.controller.apiTimeout }}
             {{- range .Values.pools }}
             - --pool={{ . }}

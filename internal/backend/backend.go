@@ -36,7 +36,8 @@ type Spec struct {
 	// WakeTimeout is how long Cursor will wait for the worker to reconnect
 	// (only meaningful for KindWake; zero when unknown).
 	WakeTimeout time.Duration
-	// APIURL is passed through to the worker as CURSOR_API_URL/ENDPOINT.
+	// APIURL is passed to hook scripts as CURSOR_API_URL/ENDPOINT.
+	// The Kubernetes backend deliberately does not forward the fleet endpoint.
 	APIURL string
 }
 

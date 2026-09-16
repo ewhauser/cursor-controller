@@ -156,3 +156,22 @@ func TestBuildsUsePatchedGoToolchain(t *testing.T) {
 		}
 	}
 }
+
+func TestReleaseWaitsForImageAndIsTagOnly(t *testing.T) {
+	var workflow struct {
+		Jobs map[string]struct {
+			Needs []string `yaml:"needs"`
+			If    string   `yaml:"if"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(readRepositoryFile(t, ".github/workflows/ci.yaml"), &workflow); err != nil {
+		t.Fatal(err)
+	}
+	release := workflow.Jobs["release"]
+	if len(release.Needs) != 1 || release.Needs[0] != "image" {
+		t.Fatal("release must wait for validated image publication")
+	}
+	if release.If != "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')" {
+		t.Fatal("release must only publish version tags")
+	}
+}

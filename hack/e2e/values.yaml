@@ -38,6 +38,10 @@ persistence:
         storage: 1Gi
 
 worker:
+  # The fake worker uses the fleet API directly; real agents use their own backend.
+  env:
+    - name: CURSOR_API_URL
+      value: http://fake-cursor-api.cursord.svc:8080
   image:
     repository: cursor-controller-e2e
     tag: dev

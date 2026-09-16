@@ -68,7 +68,8 @@ type Options struct {
 	// template does not already set it.
 	APIKeySecretName string
 	APIKeySecretKey  string
-	APIURL           string
+	// WorkerAPIEndpoint optionally overrides the agent backend, independently of the fleet API.
+	WorkerAPIEndpoint string
 	// StartupTimeout is how long a non-ready pod may remain Pending, Running,
 	// or Unknown before the controller treats the worker as failed startup.
 	StartupTimeout time.Duration
@@ -463,6 +464,11 @@ func (b *Backend) BuildPod(spec backend.Spec) *corev1.Pod {
 
 	c := b.workerContainer(pod)
 	env := backend.Env(spec)
+	delete(env, "CURSOR_API_URL")
+	delete(env, "CURSOR_API_ENDPOINT")
+	if b.o.WorkerAPIEndpoint != "" {
+		env["CURSOR_API_ENDPOINT"] = b.o.WorkerAPIEndpoint
+	}
 	names := make([]string, 0, len(env))
 	for k := range env {
 		names = append(names, k)

@@ -141,6 +141,7 @@ func run() error {
 		apiKeySecret     = fs.String("worker-api-key-secret", envOr("CONTROLLER_WORKER_API_KEY_SECRET", ""), "Secret name injected as CURSOR_API_KEY into worker pods (CONTROLLER_WORKER_API_KEY_SECRET)")
 		apiKeySecretKey  = fs.String("worker-api-key-secret-key", envOr("CONTROLLER_WORKER_API_KEY_SECRET_KEY", "api-key"), "Key inside that Secret (CONTROLLER_WORKER_API_KEY_SECRET_KEY)")
 		workerStartup    = fs.Duration("worker-startup-timeout", envDuration("CONTROLLER_WORKER_STARTUP_TIMEOUT", 10*time.Minute), "Dispose non-ready worker pods after this startup deadline (CONTROLLER_WORKER_STARTUP_TIMEOUT)")
+		workerEndpoint   = fs.String("worker-api-endpoint", os.Getenv("CONTROLLER_WORKER_API_ENDPOINT"), "Override the worker agent backend endpoint; empty uses the agent default or Pod template (CONTROLLER_WORKER_API_ENDPOINT)")
 
 		// hook backend
 		spawnCmd    = fs.String("spawn", os.Getenv("CONTROLLER_SPAWN"), "hook backend: script run per spawn/wake (CONTROLLER_SPAWN)")
@@ -215,17 +216,17 @@ func run() error {
 			return err
 		}
 		opts := kube.Options{
-			Namespace:        *namespace,
-			WorkerIDPrefix:   *prefix,
-			PodTemplate:      pod,
-			MountPath:        *mountPath,
-			SnapshotSelector: *snapshotSelector,
-			WorkerContainer:  *workerContainer,
-			APIKeySecretName: *apiKeySecret,
-			APIKeySecretKey:  *apiKeySecretKey,
-			APIURL:           *apiURL,
-			StartupTimeout:   *workerStartup,
-			Log:              log.With("backend", "kube"),
+			Namespace:         *namespace,
+			WorkerIDPrefix:    *prefix,
+			PodTemplate:       pod,
+			MountPath:         *mountPath,
+			SnapshotSelector:  *snapshotSelector,
+			WorkerContainer:   *workerContainer,
+			APIKeySecretName:  *apiKeySecret,
+			APIKeySecretKey:   *apiKeySecretKey,
+			WorkerAPIEndpoint: *workerEndpoint,
+			StartupTimeout:    *workerStartup,
+			Log:               log.With("backend", "kube"),
 		}
 		if *pvcTemplate != "" {
 			pvc, err := kube.LoadPVCTemplate(*pvcTemplate)
