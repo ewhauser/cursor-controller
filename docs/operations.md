@@ -27,3 +27,10 @@
   `stream_reconnects_total`, `workers{state}`, `warm_idle_deficit`,
   `api_requests_total`, `api_request_seconds`. `/readyz` turns 200 after the
   first successful list.
+
+### Worker credential scope
+
+Worker Pods currently receive the service-account key. A repository-scoped key
+with `--repository` can reduce its blast radius, but does not remove credential
+exposure inside workers. See the [managed worker-token proposal](proposals/worker-tokens.md)
+for the API dependency and implementation requirements.
