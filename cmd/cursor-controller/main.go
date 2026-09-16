@@ -135,6 +135,7 @@ func run() error {
 		podTemplate     = fs.String("pod-template", envOr("CONTROLLER_POD_TEMPLATE", ""), "Path to the worker Pod manifest (CONTROLLER_POD_TEMPLATE)")
 		pvcTemplate     = fs.String("pvc-template", envOr("CONTROLLER_PVC_TEMPLATE", ""), "Path to a PVC manifest; enables retained per-worker workspaces (CONTROLLER_PVC_TEMPLATE)")
 		mountPath       = fs.String("workspace-mount-path", envOr("CONTROLLER_WORKSPACE_MOUNT_PATH", "/workspace"), "Where the workspace PVC is mounted in the worker container (CONTROLLER_WORKSPACE_MOUNT_PATH)")
+		workerEndpoint  = fs.String("worker-api-endpoint", os.Getenv("CONTROLLER_WORKER_API_ENDPOINT"), "Override the worker agent backend endpoint; empty uses the agent default or Pod template (CONTROLLER_WORKER_API_ENDPOINT)")
 		workerContainer = fs.String("worker-container", envOr("CONTROLLER_WORKER_CONTAINER", ""), "Container in the pod template that receives env and the workspace mount; default first (CONTROLLER_WORKER_CONTAINER)")
 		apiKeySecret    = fs.String("worker-api-key-secret", envOr("CONTROLLER_WORKER_API_KEY_SECRET", ""), "Secret name injected as CURSOR_API_KEY into worker pods (CONTROLLER_WORKER_API_KEY_SECRET)")
 		apiKeySecretKey = fs.String("worker-api-key-secret-key", envOr("CONTROLLER_WORKER_API_KEY_SECRET_KEY", "api-key"), "Key inside that Secret (CONTROLLER_WORKER_API_KEY_SECRET_KEY)")
@@ -213,16 +214,16 @@ func run() error {
 			return err
 		}
 		opts := kube.Options{
-			Namespace:        *namespace,
-			WorkerIDPrefix:   *prefix,
-			PodTemplate:      pod,
-			MountPath:        *mountPath,
-			WorkerContainer:  *workerContainer,
-			APIKeySecretName: *apiKeySecret,
-			APIKeySecretKey:  *apiKeySecretKey,
-			APIURL:           *apiURL,
-			StartupTimeout:   *workerStartup,
-			Log:              log.With("backend", "kube"),
+			Namespace:         *namespace,
+			WorkerIDPrefix:    *prefix,
+			PodTemplate:       pod,
+			MountPath:         *mountPath,
+			WorkerContainer:   *workerContainer,
+			APIKeySecretName:  *apiKeySecret,
+			APIKeySecretKey:   *apiKeySecretKey,
+			WorkerAPIEndpoint: *workerEndpoint,
+			StartupTimeout:    *workerStartup,
+			Log:               log.With("backend", "kube"),
 		}
 		if *pvcTemplate != "" {
 			pvc, err := kube.LoadPVCTemplate(*pvcTemplate)
