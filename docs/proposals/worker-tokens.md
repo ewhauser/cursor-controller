@@ -20,9 +20,11 @@ from reading and using the credential it receives.
 The reported Cursor Agent CLI version `2026.08.11-e8db854` accepts
 `agent worker start --auth-token-file <path>`, described as intended for
 operator-managed Secret mounts. Cursor's [public sample](https://github.com/anysphere/k8s-workers#compared-to-the-operator)
-confirms operator token exchange plus `--auth-token-file`. The operator reportedly uses
-`enableAuthManagement` to exchange a service-account key for rotating worker
-tokens. These observations establish a possible consumer path, not a public
+confirms operator token exchange plus `--auth-token-file`. Cursor's
+[operator documentation](https://cursor.com/docs/cloud-agent/self-hosted/kubernetes)
+confirms `enableAuthManagement` and rereading the mounted token on expiry or
+reconnection. It also marks the operator deprecated, so the replacement API
+support policy needs confirmation. These observations establish a consumer path, not a public
 minting API contract. This repository has no supported mint endpoint, request
 schema, scopes, expiry rules, or refresh contract to implement against.
 
@@ -37,8 +39,8 @@ service-account key? Please provide:
   used outside their intended worker or exchanged for broader credentials.
 - Lifetime, expiry field, refresh/rotation protocol, overlap period, revocation,
   rate limits, and retry/idempotency behavior.
-- CLI versions supporting the token file; whether the running worker rereads
-  the file and how refresh failure/expiry is handled during active sessions.
+- Supported CLI versions and how refresh failure/expiry affects active sessions;
+  the operator docs describe rereading the file on expiry or reconnect.
 - Whether environment credentials override token-file authentication, and how
   to guarantee the long-lived service-account key stays out of worker Pods.
 
