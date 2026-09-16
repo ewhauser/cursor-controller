@@ -25,6 +25,8 @@ repository: ""
 
 controller:
   apiUrl: https://api.cursor.com
+  # Agent backend override; independent of the controller fleet API.
+  workerApiEndpoint: ""
   # Deadline for ordinary JSON API calls. SSE streams use resyncInterval.
   apiTimeout: 30s
   # Prefix for minted worker ids; also how the controller recognises its own
