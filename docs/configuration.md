@@ -52,6 +52,15 @@ variables, and `restartPolicy: Never`. With persistence enabled, it also mounts
 the workspace volume. See the [Pod](../examples/pod-template.yaml) and
 [PVC](../examples/pvc-template.yaml) examples.
 
+### Worker agent endpoint
+
+`--api-url` configures only the controller fleet REST API. Kubernetes workers
+do not inherit `CURSOR_API_URL` or `CURSOR_API_ENDPOINT` from it. Template values
+are preserved. To override the agent backend explicitly, use
+`--worker-api-endpoint` (`CONTROLLER_WORKER_API_ENDPOINT`) or Helm
+`controller.workerApiEndpoint`; this overrides only the worker container
+`CURSOR_API_ENDPOINT`. Hook scripts continue receiving both fleet URL variables.
+
 ### Controller Pod labels and worker container
 
 Set `controller.podLabels` for controller Pod labels, including network-policy

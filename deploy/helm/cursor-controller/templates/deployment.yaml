@@ -61,6 +61,9 @@ spec:
             - {{ printf "--worker-container=%s" . | quote }}
             {{- end }}
             - --worker-id-prefix={{ .Values.controller.workerIdPrefix }}
+            {{- with .Values.controller.workerApiEndpoint }}
+            - {{ printf "--worker-api-endpoint=%s" . | quote }}
+            {{- end }}
             - --api-timeout={{ .Values.controller.apiTimeout }}
             {{- range .Values.pools }}
             - --pool={{ . }}
