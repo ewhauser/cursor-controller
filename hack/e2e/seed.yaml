@@ -39,6 +39,8 @@ kind: VolumeSnapshot
 metadata:
   name: monorepo-latest
   namespace: cursord
+  labels:
+    seed: e2e-workspace
 spec:
   volumeSnapshotClassName: csi-hostpath-snapclass
   source:

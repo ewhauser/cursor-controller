@@ -7,6 +7,11 @@ metadata:
   labels:
     {{- include "cursor-controller.labels" . | nindent 4 }}
 rules:
+  {{- if and .Values.persistence.enabled .Values.persistence.snapshotSelector }}
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["list"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "patch", "delete"]

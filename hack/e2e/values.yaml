@@ -28,16 +28,14 @@ gc:
 persistence:
   enabled: true
   mountPath: /workspace
+  snapshotSelector:
+    seed: e2e-workspace
   claimSpec:
     accessModes: [ReadWriteOnce]
     storageClassName: csi-hostpath-sc
     resources:
       requests:
         storage: 1Gi
-    dataSource:
-      apiGroup: snapshot.storage.k8s.io
-      kind: VolumeSnapshot
-      name: monorepo-latest
 
 worker:
   # The fake worker uses the fleet API directly; real agents use their own backend.

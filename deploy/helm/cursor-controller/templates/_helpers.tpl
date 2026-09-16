@@ -224,3 +224,14 @@ spec:
   {{- end }}
 {{- end -}}
 {{- end -}}
+
+{{- define "cursor-controller.validateSnapshot" -}}
+{{- if .Values.persistence.snapshotSelector -}}
+{{- if not .Values.persistence.enabled -}}
+{{- fail "persistence.snapshotSelector requires persistence.enabled" -}}
+{{- end -}}
+{{- if or .Values.persistence.claimSpec.dataSource .Values.persistence.claimSpec.dataSourceRef -}}
+{{- fail "persistence.snapshotSelector conflicts with claimSpec.dataSource/dataSourceRef" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
