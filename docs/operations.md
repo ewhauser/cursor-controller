@@ -22,15 +22,13 @@
 - **Auth.** A `401`/`403` from the fleet API exits the process by default
   (`--exit-on-auth-error`) so the deployment reports an authentication failure.
   Pool workers require a *team service-account* key; personal keys are rejected.
+- **Worker credential scope.** Worker Pods currently receive the service-account
+  key. A repository-scoped key with `--repository` can reduce its blast radius,
+  but does not remove credential exposure inside workers. See the
+  [managed worker-token proposal](proposals/worker-tokens.md) for the API
+  dependency and implementation requirements.
 - **Metrics** on `--metrics-addr` (`:8080`): `cursor_controller_claims_total`,
   `spawns_total`, `wakes_total`, `releases_total`, `disposals_total`,
   `stream_reconnects_total`, `workers{state}`, `warm_idle_deficit`,
   `api_requests_total`, `api_request_seconds`. `/readyz` turns 200 after the
   first successful list.
-
-### Worker credential scope
-
-Worker Pods currently receive the service-account key. A repository-scoped key
-with `--repository` can reduce its blast radius, but does not remove credential
-exposure inside workers. See the [managed worker-token proposal](proposals/worker-tokens.md)
-for the API dependency and implementation requirements.
