@@ -30,6 +30,8 @@ controller:
   # Prefix for minted worker ids; also how the controller recognises its own
   # workers. Lowercase alphanumerics and dashes, <= 40 chars.
   workerIdPrefix: cc
+  # Container in a custom worker.podTemplate receiving env and workspace mounts.
+  workerContainer: ""
   # Keep N idle workers connected per pool (0 = claim-then-spawn only).
   warmIdle: 0
   warmInterval: 1m
@@ -49,6 +51,8 @@ controller:
       memory: 64Mi
     limits:
       memory: 256Mi
+  # Extra labels on controller Pods (selector labels are reserved).
+  podLabels: {}
   podAnnotations: {}
   nodeSelector: {}
   tolerations: []

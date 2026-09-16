@@ -51,3 +51,11 @@ are insufficient. The controller sets names, ownership labels, worker environmen
 variables, and `restartPolicy: Never`. With persistence enabled, it also mounts
 the workspace volume. See the [Pod](../examples/pod-template.yaml) and
 [PVC](../examples/pvc-template.yaml) examples.
+
+### Controller Pod labels and worker container
+
+Set `controller.podLabels` for controller Pod labels, including network-policy
+selectors. The chart's required selector labels take precedence on collisions.
+`controller.workerContainer` selects the container in a custom
+`worker.podTemplate` that receives worker environment and workspace mounts;
+empty preserves the default of selecting the first container.
