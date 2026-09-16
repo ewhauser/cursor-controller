@@ -74,6 +74,9 @@ gc:
 persistence:
   enabled: false
   mountPath: /workspace
+  # Match labels on namespace-local snapshots; newest readyToUse wins.
+  # Mutually exclusive with claimSpec.dataSource/dataSourceRef.
+  snapshotSelector: {}
   claimSpec:
     accessModes: [ReadWriteOnce]
     storageClassName: gp3

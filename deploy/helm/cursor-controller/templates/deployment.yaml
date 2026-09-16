@@ -1,4 +1,5 @@
 {{- $_ := include "cursor-controller.validate" . }}
+{{- $_ := include "cursor-controller.validateSnapshot" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +53,13 @@ spec:
             - --pod-template=/etc/cursor-controller/pod-template.yaml
             {{- if .Values.persistence.enabled }}
             - --pvc-template=/etc/cursor-controller/pvc-template.yaml
+            {{- with .Values.persistence.snapshotSelector }}
+            {{- $selectors := list }}
+            {{- range $key, $value := . }}
+            {{- $selectors = append $selectors (printf "%s=%s" $key (toString $value)) }}
+            {{- end }}
+            - {{ printf "--workspace-snapshot-selector=%s" (join "," $selectors) | quote }}
+            {{- end }}
             - --workspace-mount-path={{ .Values.persistence.mountPath }}
             {{- end }}
             - --worker-api-key-secret={{ include "cursor-controller.secretName" . }}

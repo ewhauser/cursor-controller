@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ewhauser/cursor-controller/internal/backend"
@@ -49,9 +50,12 @@ const (
 // Options configures the backend.
 type Options struct {
 	Client         kubernetes.Interface
-	Namespace      string
-	WorkerIDPrefix string
-	PodTemplate    *corev1.Pod
+	SnapshotClient dynamic.Interface
+	// SnapshotSelector resolves the newest ready snapshot for new workspaces only.
+	SnapshotSelector string
+	Namespace        string
+	WorkerIDPrefix   string
+	PodTemplate      *corev1.Pod
 	// PVCTemplate enables persistent, hibernation-safe workspaces. Nil means
 	// workers are ephemeral pods only.
 	PVCTemplate *corev1.PersistentVolumeClaim
@@ -90,6 +94,17 @@ func New(o Options) (*Backend, error) {
 	}
 	if err := backend.ValidatePrefix(o.WorkerIDPrefix); err != nil {
 		return nil, err
+	}
+	if o.SnapshotSelector != "" {
+		if _, err := labels.Parse(o.SnapshotSelector); err != nil {
+			return nil, fmt.Errorf("kube: snapshot selector: %w", err)
+		}
+		if o.SnapshotClient == nil || o.PVCTemplate == nil {
+			return nil, errors.New("kube: snapshot selector requires persistence and a snapshot client")
+		}
+		if o.PVCTemplate.Spec.DataSource != nil || o.PVCTemplate.Spec.DataSourceRef != nil {
+			return nil, errors.New("kube: snapshot selector conflicts with fixed dataSource/dataSourceRef")
+		}
 	}
 	if o.MountPath == "" {
 		o.MountPath = "/workspace"
@@ -344,6 +359,20 @@ func (b *Backend) Dispose(ctx context.Context, workerID, reason string) error {
 func (b *Backend) ensurePVC(ctx context.Context, spec backend.Spec) error {
 	pvcs := b.o.Client.CoreV1().PersistentVolumeClaims(b.o.Namespace)
 	name := PVCName(spec.WorkerID)
+	// Reuse retained claims without resolving the current seed again.
+	existing, err := pvcs.Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		if existing.DeletionTimestamp != nil {
+			return fmt.Errorf("pvc %s is terminating", name)
+		}
+		if existing.Labels[LabelWorkerID] != spec.WorkerID {
+			return fmt.Errorf("pvc %s belongs to another worker", name)
+		}
+		return b.annotatePVC(ctx, spec.WorkerID, spec.RequestID(), spec.Kind)
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get pvc %s: %w", name, err)
+	}
 	pvc := b.o.PVCTemplate.DeepCopy()
 	pvc.TypeMeta = metav1.TypeMeta{}
 	pvc.ObjectMeta = metav1.ObjectMeta{
@@ -352,7 +381,12 @@ func (b *Backend) ensurePVC(ctx context.Context, spec backend.Spec) error {
 		Labels:      mergeMaps(b.o.PVCTemplate.Labels, b.labels(spec, ComponentWorkspace)),
 		Annotations: mergeMaps(b.o.PVCTemplate.Annotations, b.annotations(spec)),
 	}
-	_, err := pvcs.Create(ctx, pvc, metav1.CreateOptions{})
+	if b.o.SnapshotSelector != "" {
+		if err := b.selectSnapshot(ctx, pvc); err != nil {
+			return err
+		}
+	}
+	_, err = pvcs.Create(ctx, pvc, metav1.CreateOptions{})
 	if err == nil {
 		b.o.Log.Info("created workspace pvc", "worker", spec.WorkerID, "pvc", name)
 		return nil
@@ -360,9 +394,12 @@ func (b *Backend) ensurePVC(ctx context.Context, spec backend.Spec) error {
 	if !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create pvc %s: %w", name, err)
 	}
-	existing, err := pvcs.Get(ctx, name, metav1.GetOptions{})
+	existing, err = pvcs.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("get pvc %s: %w", name, err)
+	}
+	if existing.DeletionTimestamp != nil {
+		return fmt.Errorf("pvc %s is terminating", name)
 	}
 	if owner := existing.Labels[LabelWorkerID]; owner != spec.WorkerID {
 		return fmt.Errorf("pvc %s already exists for worker %q", name, owner)
@@ -395,6 +432,15 @@ func (b *Backend) annotatePod(ctx context.Context, name, requestID string) error
 
 func (b *Backend) createPod(ctx context.Context, spec backend.Spec) error {
 	pod := b.BuildPod(spec)
+	if b.Persistent() {
+		pvc, err := b.o.Client.CoreV1().PersistentVolumeClaims(b.o.Namespace).Get(ctx, PVCName(spec.WorkerID), metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get workspace seed: %w", err)
+		}
+		if seed := pvc.Annotations[AnnSeedSnapshot]; seed != "" {
+			pod.Annotations[AnnSeedSnapshot] = seed
+		}
+	}
 	created, err := b.o.Client.CoreV1().Pods(b.o.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("create pod %s: %w", pod.Name, err)

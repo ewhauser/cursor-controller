@@ -197,7 +197,15 @@ func TestClaimSpawnHibernateWakeDispose(t *testing.T) {
 		}
 		return p.Status.Phase == corev1.ClaimBound, string(p.Status.Phase)
 	})
+	if pvc := h.pvc(worker); pvc.Spec.DataSource == nil || pvc.Spec.DataSource.Name != "monorepo-latest" || pvc.Annotations[kube.AnnSeedSnapshot] != "monorepo-latest" {
+		t.Fatalf("workspace did not use selected seed: %+v", pvc)
+	}
 	first := h.waitConnects(worker, 1, 120*time.Second)[0]
+	for _, pod := range h.pods(worker) {
+		if pod.Annotations[kube.AnnSeedSnapshot] != "monorepo-latest" {
+			t.Fatalf("pod missing seed generation: %+v", pod.Annotations)
+		}
+	}
 	if first.Wake || first.MarkerFound || first.RequestID != reqID {
 		t.Fatalf("first connect = %+v", first)
 	}

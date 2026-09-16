@@ -19,6 +19,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/errgroup"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -130,15 +131,16 @@ func run() error {
 		otelService  = fs.String("otel-service-name", envOr("OTEL_SERVICE_NAME", "cursor-controller"), "service.name resource attribute (OTEL_SERVICE_NAME)")
 
 		// kube backend
-		kubeconfig      = fs.String("kubeconfig", os.Getenv("KUBECONFIG"), "Path to kubeconfig; empty uses in-cluster config (KUBECONFIG)")
-		namespace       = fs.String("namespace", envOr("CONTROLLER_NAMESPACE", envOr("POD_NAMESPACE", "")), "Namespace for worker pods and PVCs (CONTROLLER_NAMESPACE)")
-		podTemplate     = fs.String("pod-template", envOr("CONTROLLER_POD_TEMPLATE", ""), "Path to the worker Pod manifest (CONTROLLER_POD_TEMPLATE)")
-		pvcTemplate     = fs.String("pvc-template", envOr("CONTROLLER_PVC_TEMPLATE", ""), "Path to a PVC manifest; enables retained per-worker workspaces (CONTROLLER_PVC_TEMPLATE)")
-		mountPath       = fs.String("workspace-mount-path", envOr("CONTROLLER_WORKSPACE_MOUNT_PATH", "/workspace"), "Where the workspace PVC is mounted in the worker container (CONTROLLER_WORKSPACE_MOUNT_PATH)")
-		workerContainer = fs.String("worker-container", envOr("CONTROLLER_WORKER_CONTAINER", ""), "Container in the pod template that receives env and the workspace mount; default first (CONTROLLER_WORKER_CONTAINER)")
-		apiKeySecret    = fs.String("worker-api-key-secret", envOr("CONTROLLER_WORKER_API_KEY_SECRET", ""), "Secret name injected as CURSOR_API_KEY into worker pods (CONTROLLER_WORKER_API_KEY_SECRET)")
-		apiKeySecretKey = fs.String("worker-api-key-secret-key", envOr("CONTROLLER_WORKER_API_KEY_SECRET_KEY", "api-key"), "Key inside that Secret (CONTROLLER_WORKER_API_KEY_SECRET_KEY)")
-		workerStartup   = fs.Duration("worker-startup-timeout", envDuration("CONTROLLER_WORKER_STARTUP_TIMEOUT", 10*time.Minute), "Dispose non-ready worker pods after this startup deadline (CONTROLLER_WORKER_STARTUP_TIMEOUT)")
+		kubeconfig       = fs.String("kubeconfig", os.Getenv("KUBECONFIG"), "Path to kubeconfig; empty uses in-cluster config (KUBECONFIG)")
+		namespace        = fs.String("namespace", envOr("CONTROLLER_NAMESPACE", envOr("POD_NAMESPACE", "")), "Namespace for worker pods and PVCs (CONTROLLER_NAMESPACE)")
+		podTemplate      = fs.String("pod-template", envOr("CONTROLLER_POD_TEMPLATE", ""), "Path to the worker Pod manifest (CONTROLLER_POD_TEMPLATE)")
+		snapshotSelector = fs.String("workspace-snapshot-selector", os.Getenv("CONTROLLER_WORKSPACE_SNAPSHOT_SELECTOR"), "Label selector for the newest ready namespace-local seed snapshot (CONTROLLER_WORKSPACE_SNAPSHOT_SELECTOR)")
+		pvcTemplate      = fs.String("pvc-template", envOr("CONTROLLER_PVC_TEMPLATE", ""), "Path to a PVC manifest; enables retained per-worker workspaces (CONTROLLER_PVC_TEMPLATE)")
+		mountPath        = fs.String("workspace-mount-path", envOr("CONTROLLER_WORKSPACE_MOUNT_PATH", "/workspace"), "Where the workspace PVC is mounted in the worker container (CONTROLLER_WORKSPACE_MOUNT_PATH)")
+		workerContainer  = fs.String("worker-container", envOr("CONTROLLER_WORKER_CONTAINER", ""), "Container in the pod template that receives env and the workspace mount; default first (CONTROLLER_WORKER_CONTAINER)")
+		apiKeySecret     = fs.String("worker-api-key-secret", envOr("CONTROLLER_WORKER_API_KEY_SECRET", ""), "Secret name injected as CURSOR_API_KEY into worker pods (CONTROLLER_WORKER_API_KEY_SECRET)")
+		apiKeySecretKey  = fs.String("worker-api-key-secret-key", envOr("CONTROLLER_WORKER_API_KEY_SECRET_KEY", "api-key"), "Key inside that Secret (CONTROLLER_WORKER_API_KEY_SECRET_KEY)")
+		workerStartup    = fs.Duration("worker-startup-timeout", envDuration("CONTROLLER_WORKER_STARTUP_TIMEOUT", 10*time.Minute), "Dispose non-ready worker pods after this startup deadline (CONTROLLER_WORKER_STARTUP_TIMEOUT)")
 
 		// hook backend
 		spawnCmd    = fs.String("spawn", os.Getenv("CONTROLLER_SPAWN"), "hook backend: script run per spawn/wake (CONTROLLER_SPAWN)")
@@ -217,6 +219,7 @@ func run() error {
 			WorkerIDPrefix:   *prefix,
 			PodTemplate:      pod,
 			MountPath:        *mountPath,
+			SnapshotSelector: *snapshotSelector,
 			WorkerContainer:  *workerContainer,
 			APIKeySecretName: *apiKeySecret,
 			APIKeySecretKey:  *apiKeySecretKey,
@@ -231,7 +234,7 @@ func run() error {
 			}
 			opts.PVCTemplate = pvc
 		}
-		client, ns, err := kubeClient(*kubeconfig, *otelEnabled && *otelTraces)
+		client, snapshotClient, ns, err := kubeClient(*kubeconfig, *otelEnabled && *otelTraces)
 		if err != nil {
 			return err
 		}
@@ -242,6 +245,7 @@ func run() error {
 			return errors.New("--namespace is required (could not infer from kubeconfig or service account)")
 		}
 		opts.Client = client
+		opts.SnapshotClient = snapshotClient
 		kb, err := kube.New(opts)
 		if err != nil {
 			return err
@@ -329,8 +333,9 @@ func newLogger(level, format string) (*slog.Logger, error) {
 
 // kubeClient builds a clientset from kubeconfig or in-cluster config and
 // returns the default namespace it implies.
-func kubeClient(kubeconfig string, traced bool) (kubernetes.Interface, string, error) {
+func kubeClient(kubeconfig string, traced bool) (kubernetes.Interface, dynamic.Interface, string, error) {
 	wrap := func(cfg *rest.Config) *rest.Config {
+		cfg = rest.CopyConfig(cfg)
 		if traced {
 			cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
 				return otelhttp.NewTransport(rt, otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
@@ -344,13 +349,14 @@ func kubeClient(kubeconfig string, traced bool) (kubernetes.Interface, string, e
 		if cfg, err := rest.InClusterConfig(); err == nil {
 			cs, err := kubernetes.NewForConfig(wrap(cfg))
 			if err != nil {
-				return nil, "", err
+				return nil, nil, "", err
 			}
 			ns := ""
 			if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
 				ns = strings.TrimSpace(string(b))
 			}
-			return cs, ns, nil
+			dc, err := dynamic.NewForConfig(wrap(cfg))
+			return cs, dc, ns, err
 		}
 	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -360,12 +366,13 @@ func kubeClient(kubeconfig string, traced bool) (kubernetes.Interface, string, e
 	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{})
 	cfg, err := cc.ClientConfig()
 	if err != nil {
-		return nil, "", fmt.Errorf("kubernetes config: %w", err)
+		return nil, nil, "", fmt.Errorf("kubernetes config: %w", err)
 	}
 	cs, err := kubernetes.NewForConfig(wrap(cfg))
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	ns, _, _ := cc.Namespace()
-	return cs, ns, nil
+	dc, err := dynamic.NewForConfig(wrap(cfg))
+	return cs, dc, ns, err
 }
