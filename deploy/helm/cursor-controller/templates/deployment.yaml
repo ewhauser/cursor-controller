@@ -20,7 +20,8 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "cursor-controller.selectorLabels" . | nindent 8 }}
+        {{- $selector := include "cursor-controller.selectorLabels" . | fromYaml }}
+        {{- toYaml (mergeOverwrite (deepCopy .Values.controller.podLabels) $selector) | nindent 8 }}
       annotations:
         checksum/templates: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.controller.podAnnotations }}
@@ -56,6 +57,9 @@ spec:
             {{- end }}
             - --worker-api-key-secret={{ include "cursor-controller.secretName" . }}
             - --worker-api-key-secret-key={{ .Values.auth.secretKey }}
+            {{- with .Values.controller.workerContainer }}
+            - {{ printf "--worker-container=%s" . | quote }}
+            {{- end }}
             - --worker-id-prefix={{ .Values.controller.workerIdPrefix }}
             {{- with .Values.controller.workerApiEndpoint }}
             - {{ printf "--worker-api-endpoint=%s" . | quote }}

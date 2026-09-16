@@ -60,3 +60,11 @@ are preserved. To override the agent backend explicitly, use
 `--worker-api-endpoint` (`CONTROLLER_WORKER_API_ENDPOINT`) or Helm
 `controller.workerApiEndpoint`; this overrides only the worker container
 `CURSOR_API_ENDPOINT`. Hook scripts continue receiving both fleet URL variables.
+
+### Controller Pod labels and worker container
+
+Set `controller.podLabels` for controller Pod labels, including network-policy
+selectors. The chart's required selector labels take precedence on collisions.
+`controller.workerContainer` selects the container in a custom
+`worker.podTemplate` that receives worker environment and workspace mounts;
+empty preserves the default of selecting the first container.
