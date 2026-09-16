@@ -55,7 +55,7 @@ func newBackend(t *testing.T, persistent bool) (*Backend, *fake.Clientset) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := Options{Namespace: "cursord", WorkerIDPrefix: "cc", PodTemplate: pod, APIKeySecretName: "cursor-key", APIURL: "https://api.cursor.com"}
+	opts := Options{Namespace: "cursord", WorkerIDPrefix: "cc", PodTemplate: pod, APIKeySecretName: "cursor-key"}
 	if persistent {
 		pvc, err := ParsePVCTemplate([]byte(pvcYAML))
 		if err != nil {
@@ -84,7 +84,7 @@ func TestSpawnCreatesPVCAndPod(t *testing.T) {
 	b, cs := newBackend(t, true)
 	ctx := context.Background()
 	req := &cursorapi.PendingRequest{ID: "bc-1", UserID: 7, RepoURL: "https://github.com/acme/mono", RepoOwner: "acme", RepoName: "mono"}
-	spec := backend.Spec{WorkerID: "cc-0123456789ab", Pool: "gpu", Kind: backend.KindClaim, Request: req, APIURL: "https://api.cursor.com"}
+	spec := backend.Spec{WorkerID: "cc-0123456789ab", Pool: "gpu", Kind: backend.KindClaim, Request: req}
 	if err := b.Spawn(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestSpawnCreatesPVCAndPod(t *testing.T) {
 	env := envMap(p.Spec.Containers[0])
 	if env["CURSOR_POOL"].Value != "gpu" || env["CURSOR_AGENT_WORKER_ID"].Value != "cc-0123456789ab" || env["CURSOR_REQUEST_ID"].Value != "bc-1" ||
 		env["CURSOR_USER_ID"].Value != "7" || env["CURSOR_REPO_URL"].Value != "https://github.com/acme/mono" || env["KEEP"].Value != "me" ||
-		env["CURSOR_WORKSPACE_PATH"].Value != "/workspace" || env["CURSOR_API_URL"].Value != "https://api.cursor.com" {
+		env["CURSOR_WORKSPACE_PATH"].Value != "/workspace" {
 		t.Fatalf("env = %+v", env)
 	}
 	if _, wake := env["CURSOR_WAKE"]; wake {
