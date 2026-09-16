@@ -27,3 +27,21 @@
   `stream_reconnects_total`, `workers{state}`, `warm_idle_deficit`,
   `api_requests_total`, `api_request_seconds`. `/readyz` turns 200 after the
   first successful list.
+
+### Startup versus busy readiness
+
+The startup deadline is measured from Pod creation, including scheduling and
+workspace restore. It stops applying after the worker passes its startup probe
+or is observed ready. That fact is recorded on the Pod as
+`cursor-controller.dev/started`, survives controller restarts, and resets for
+new Pods on wake. Later `/readyz` failures during a session do not trigger
+startup cleanup. Terminal Pods are still treated as stopped.
+
+The chart and example use `/healthz` for the startup probe and `/readyz` for
+readiness. Custom templates should also set a startup probe: polling can miss
+a brief ready period before a session starts. `containerStatuses.started` is
+only trusted when that container has a startup probe. For existing Pods without
+one, keep the `/healthz` readiness workaround until workers are recreated with
+the updated template. Increase both the controller deadline and startup probe
+budget for slow restores. With probes disabled there is no durable startup
+signal unless the controller observes readiness.
