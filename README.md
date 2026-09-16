@@ -140,3 +140,5 @@ and validate the Helm chart.
 
 [Apache License 2.0](LICENSE). Cursor is a trademark of Anysphere, Inc.
 This project is not affiliated with or endorsed by Anysphere.
+
+See [release publishing and OCI installation](docs/releases.md) for tagged artifacts.
